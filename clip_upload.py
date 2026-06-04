@@ -8,6 +8,7 @@
 import io
 import json
 import logging
+import msvcrt
 import os
 import shutil
 import subprocess
@@ -21,13 +22,14 @@ from pathlib import Path
 from tkinter import ttk
 import tkinter as tk
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "clip-upload"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 LOG_PATH = CONFIG_DIR / "clip_upload.log"
+LOCK_PATH = CONFIG_DIR / "clip_upload.lock"
 
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -36,6 +38,33 @@ log.setLevel(logging.DEBUG)
 _fh = logging.FileHandler(LOG_PATH, encoding="utf-8")
 _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 log.addHandler(_fh)
+
+
+# ── 单实例锁 ─────────────────────────────────────────
+class SingleInstance:
+    def __init__(self):
+        self.lockfile = None
+
+    def acquire(self):
+        try:
+            self.lockfile = open(LOCK_PATH, "w")
+            msvcrt.locking(self.lockfile.fileno(), msvcrt.LK_NBLCK, 1)
+            self.lockfile.write(str(os.getpid()))
+            self.lockfile.flush()
+            return True
+        except (IOError, OSError):
+            if self.lockfile:
+                self.lockfile.close()
+            return False
+
+    def release(self):
+        try:
+            if self.lockfile:
+                msvcrt.locking(self.lockfile.fileno(), msvcrt.LK_UNLCK, 1)
+                self.lockfile.close()
+        except Exception:
+            pass
+
 
 # ── 配置 ──────────────────────────────────────────────
 if getattr(sys, "frozen", False):
@@ -101,15 +130,15 @@ def set_clipboard_text(text):
         win32clipboard.CloseClipboard()
         return
     except Exception as e:
-        log.debug("win32clipboard failed, fallback to powershell: %s", e)
+        log.debug("win32clipboard failed: %s", e)
     try:
         import base64
-        safe = text.replace("'", "''")
+        safe = text.replace("'", "''").replace("\n", " ")
         ps_cmd = f"Set-Clipboard -Value '{safe}'"
         encoded = base64.b64encode(ps_cmd.encode("utf-16-le")).decode()
         subprocess.run(
             ["powershell", "-EncodedCommand", encoded],
-            capture_output=True,
+            capture_output=True, timeout=5,
         )
     except Exception as e:
         log.error("set_clipboard_text failed: %s", e)
@@ -142,13 +171,11 @@ def upload_file(local_path, cfg, filename):
     remote_path = cfg["remote_path"].rstrip("/")
     dest = f"{remote_path}/{filename}"
 
-    # 本地模式
     if not server or server in ("localhost", "127.0.0.1", "local"):
         os.makedirs(remote_path.replace("/", os.sep), exist_ok=True)
         shutil.copy2(local_path, dest.replace("/", os.sep))
         return dest
 
-    # SFTP 上传 (paramiko)
     import paramiko
 
     port = int(cfg.get("port", 22))
@@ -159,22 +186,8 @@ def upload_file(local_path, cfg, filename):
     transport = None
     try:
         transport = paramiko.Transport((server, port))
-        transport.set_log_logger(log)
-
-        # Load known hosts for verification
-        known_hosts = Path.home() / ".ssh" / "known_hosts"
-        host_keys = None
-        if known_hosts.exists():
-            try:
-                host_keys = paramiko.HostKeys(filename=str(known_hosts))
-            except Exception:
-                pass
-
-        if host_keys:
-            transport.get_security_options().keys = transport.get_security_options().keys
 
         if ssh_key and os.path.isfile(ssh_key):
-            # Try loading key in different formats
             key = None
             for loader in [paramiko.Ed25519Key.from_private_key_file,
                            paramiko.RSAKey.from_private_key_file,
@@ -217,18 +230,39 @@ def upload_file(local_path, cfg, filename):
             transport.close()
 
 
-# ── 通知 ──────────────────────────────────────────────
+# ── 通知 (纯 tkinter, 不依赖 pkg_resources) ──────────
 def show_notification(title, message):
+    # 用 tkinter 弹窗替代 win10toast，避免 pkg_resources 依赖
+    def _show():
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            root.after(3000, root.destroy)
+            try:
+                from tkinter import messagebox
+                # 不用 messagebox, 用一个无边框小窗口
+                pass
+            except Exception:
+                pass
+            root.mainloop()
+        except Exception:
+            pass
+
+    # 尝试系统托盘气泡通知
     try:
-        from win10toast_click import ToastNotifier
-        ToastNotifier().show_toast(title, message, duration=3, threaded=True)
+        import ctypes
+        ctypes.windll.user32.MessageBoxTimeoutW(
+            0, message, title, 0x40, 0, 3000
+        )
         return
-    except Exception as e:
-        log.debug("win10toast failed: %s", e)
+    except Exception:
+        pass
+
+    # 最终 fallback: PowerShell 通知
     try:
         import base64
-        safe_title = str(title).replace("'", "''")
-        safe_msg = str(message).replace("'", "''")
+        safe_title = str(title).replace("'", "''").replace("\n", " ")[:100]
+        safe_msg = str(message).replace("'", "''").replace("\n", " ")[:200]
         ps = (
             "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
             f"$n = New-Object System.Windows.Forms.NotifyIcon; "
@@ -241,15 +275,31 @@ def show_notification(title, message):
         encoded = base64.b64encode(ps.encode("utf-16-le")).decode()
         subprocess.run(
             ["powershell", "-EncodedCommand", encoded],
-            capture_output=True, timeout=5,
+            capture_output=True, timeout=8,
         )
     except Exception as e:
-        log.debug("powershell notification failed: %s", e)
+        log.debug("notification failed: %s", e)
 
 
 # ── 核心上传动作 ──────────────────────────────────────
 def do_upload(cfg):
     try:
+        # 检查配置
+        server = cfg.get("server", "").strip()
+        if not server:
+            show_notification("Clip Upload", "请先配置服务器信息：右键托盘图标 → 设置")
+            return
+
+        username = cfg.get("username", "").strip()
+        password = cfg.get("password", "")
+        ssh_key = cfg.get("ssh_key", "").strip()
+        if not username:
+            show_notification("Clip Upload", "请先配置用户名：右键托盘图标 → 设置")
+            return
+        if not password and not ssh_key:
+            show_notification("Clip Upload", "请先配置密码或 SSH 密钥：右键托盘图标 → 设置")
+            return
+
         image_data = get_clipboard_image()
         if not image_data:
             show_notification("Clip Upload", "剪贴板中没有图片，请先截图")
@@ -263,6 +313,7 @@ def do_upload(cfg):
         try:
             upload_file(temp_path, cfg, filename)
         except Exception as e:
+            log.error("upload failed: %s\n%s", e, traceback.format_exc())
             show_notification("Clip Upload", f"上传失败: {e}")
             return
         finally:
@@ -427,7 +478,7 @@ class SettingsDialog:
         self.root.resizable(False, False)
         self.root.configure(bg="#f5f5f5")
 
-        w, h = 520, 540
+        w, h = 520, 560
         x = (self.root.winfo_screenwidth() - w) // 2
         y = (self.root.winfo_screenheight() - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
@@ -473,13 +524,14 @@ class SettingsDialog:
 
         # 密码
         add_label("密码:", row)
+        pwd_frame = ttk.Frame(main)
+        pwd_frame.grid(row=row, column=1, sticky="ew", pady=5, padx=(10, 0))
         self.password_var = tk.StringVar(value=cfg.get("password", ""))
-        self.pwd_entry = ttk.Entry(main, textvariable=self.password_var, width=38, show="*")
-        self.pwd_entry.grid(row=row, column=1, sticky="ew", pady=5, padx=(10, 0))
+        self.pwd_entry = ttk.Entry(pwd_frame, textvariable=self.password_var, width=30, show="*")
+        self.pwd_entry.pack(side="left", fill="x", expand=True)
         self.show_pwd_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            main, text="显示", variable=self.show_pwd_var, command=self._toggle_pwd
-        ).grid(row=row, column=1, sticky="e", padx=(10, 0))
+        ttk.Checkbutton(pwd_frame, text="显示", variable=self.show_pwd_var,
+                        command=self._toggle_pwd).pack(side="left", padx=(6, 0))
         row += 1
 
         # SSH 密钥
@@ -573,7 +625,10 @@ class SettingsDialog:
 
     def _save(self):
         self.cfg["server"] = self.server_var.get().strip()
-        self.cfg["port"] = int(self.port_var.get().strip() or 22)
+        try:
+            self.cfg["port"] = int(self.port_var.get().strip() or 22)
+        except ValueError:
+            self.cfg["port"] = 22
         self.cfg["username"] = self.username_var.get().strip()
         self.cfg["password"] = self.password_var.get()
         self.cfg["ssh_key"] = self.key_var.get().strip()
@@ -584,6 +639,8 @@ class SettingsDialog:
         self.cfg["hotkey"] = self.hotkey_var.get().strip()
         self.cfg["auto_update"] = self.auto_update_var.get()
         save_config(self.cfg)
+        log.info("config saved: server=%s user=%s path=%s",
+                 self.cfg["server"], self.cfg["username"], self.cfg["remote_path"])
         if self.on_save:
             self.on_save(self.cfg)
         self.root.destroy()
@@ -658,13 +715,21 @@ def create_tray_icon(cfg, on_quit):
 
 # ── 主入口 ────────────────────────────────────────────
 def main():
+    log.info("=" * 50)
     log.info("ClipUpload v%s starting", __version__)
     log.info("exe: %s", sys.executable)
     log.info("config: %s", CONFIG_PATH)
 
+    # 单实例检查
+    instance = SingleInstance()
+    if not instance.acquire():
+        log.warning("another instance already running, exiting")
+        show_notification("Clip Upload", "已在运行中，请查看系统托盘")
+        return
+
     cfg = load_config()
     hotkey = cfg.get("hotkey", "ctrl+alt+u")
-    quit_event = lambda: os._exit(0)
+    quit_event = lambda: (instance.release(), os._exit(0))
 
     log.info("server=%s port=%s user=%s path=%s",
              cfg.get("server"), cfg.get("port"), cfg.get("username"), cfg.get("remote_path"))

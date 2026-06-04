@@ -28,10 +28,11 @@ jobs:
             --name=ClipUpload ^
             --hidden-import=keyboard ^
             --hidden-import=pystray ^
-            --hidden-import=win10toast_click ^
             --hidden-import=win32clipboard ^
             --hidden-import=win32con ^
             --hidden-import=PIL.ImageGrab ^
+            --hidden-import=paramiko ^
+            --hidden-import=nacl ^
             clip_upload.py
         shell: cmd
 
