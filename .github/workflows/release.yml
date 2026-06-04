@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -25,7 +28,7 @@ jobs:
             --name=ClipUpload ^
             --hidden-import=keyboard ^
             --hidden-import=pystray ^
-            --hidden-import=win10toast ^
+            --hidden-import=win10toast_click ^
             --hidden-import=win32clipboard ^
             --hidden-import=win32con ^
             --hidden-import=PIL.ImageGrab ^
