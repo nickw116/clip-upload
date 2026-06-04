@@ -135,7 +135,7 @@ def upload_file(local_path, cfg, filename):
 # ── 通知 ──────────────────────────────────────────────
 def show_notification(title, message):
     try:
-        from win10toast import ToastNotifier
+        from win10toast_click import ToastNotifier
         ToastNotifier().show_toast(title, message, duration=3, threaded=True)
         return
     except Exception:
