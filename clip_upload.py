@@ -159,12 +159,33 @@ def upload_file(local_path, cfg, filename):
     transport = None
     try:
         transport = paramiko.Transport((server, port))
+        transport.set_log_logger(log)
+
+        # Load known hosts for verification
+        known_hosts = Path.home() / ".ssh" / "known_hosts"
+        host_keys = None
+        if known_hosts.exists():
+            try:
+                host_keys = paramiko.HostKeys(filename=str(known_hosts))
+            except Exception:
+                pass
+
+        if host_keys:
+            transport.get_security_options().keys = transport.get_security_options().keys
+
         if ssh_key and os.path.isfile(ssh_key):
-            pkey = paramiko.AutoAddPolicy()
-            key = paramiko.RSAKey.from_private_key_file(ssh_key)
-            transport.connect(username=username, pkey=key)
-        elif ssh_key and os.path.isfile(ssh_key):
-            key = paramiko.Ed25519Key.from_private_key_file(ssh_key)
+            # Try loading key in different formats
+            key = None
+            for loader in [paramiko.Ed25519Key.from_private_key_file,
+                           paramiko.RSAKey.from_private_key_file,
+                           paramiko.ECDSAKey.from_private_key_file]:
+                try:
+                    key = loader(ssh_key)
+                    break
+                except (paramiko.SSHException, ValueError):
+                    continue
+            if not key:
+                raise RuntimeError(f"无法加载密钥文件: {ssh_key}")
             transport.connect(username=username, pkey=key)
         else:
             transport.connect(username=username, password=password)
@@ -185,8 +206,8 @@ def upload_file(local_path, cfg, filename):
             except IOError:
                 try:
                     sftp.mkdir(d)
-                except IOError:
-                    pass
+                except IOError as e:
+                    log.debug("mkdir %s: %s", d, e)
 
         sftp.put(local_path, dest)
         log.info("SFTP uploaded to %s:%s", server, dest)
