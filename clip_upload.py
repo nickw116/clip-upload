@@ -7,30 +7,41 @@
 
 import io
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
-import time
+import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
 import tkinter as tk
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
+
+# ── 日志 ──────────────────────────────────────────────
+CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "clip-upload"
+CONFIG_PATH = CONFIG_DIR / "config.json"
+LOG_PATH = CONFIG_DIR / "clip_upload.log"
+
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+log = logging.getLogger("clip_upload")
+log.setLevel(logging.DEBUG)
+_fh = logging.FileHandler(LOG_PATH, encoding="utf-8")
+_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+log.addHandler(_fh)
 
 # ── 配置 ──────────────────────────────────────────────
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).parent
 else:
     APP_DIR = Path(__file__).parent
-
-CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "clip-upload"
-CONFIG_PATH = CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
     "server": "user@your-server.com",
@@ -52,7 +63,6 @@ def load_config():
             for k, v in DEFAULT_CONFIG.items():
                 cfg.setdefault(k, v)
             return cfg
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     save_config(DEFAULT_CONFIG)
     return DEFAULT_CONFIG.copy()
 
@@ -73,7 +83,8 @@ def get_clipboard_image():
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
-    except Exception:
+    except Exception as e:
+        log.warning("get_clipboard_image failed: %s", e)
         return None
 
 
@@ -84,7 +95,10 @@ def set_clipboard_text(text):
         win32clipboard.EmptyClipboard()
         win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
         win32clipboard.CloseClipboard()
-    except Exception:
+        return
+    except Exception as e:
+        log.debug("win32clipboard failed, fallback to powershell: %s", e)
+    try:
         import base64
         safe = text.replace("'", "''")
         ps_cmd = f"Set-Clipboard -Value '{safe}'"
@@ -93,6 +107,8 @@ def set_clipboard_text(text):
             ["powershell", "-EncodedCommand", encoded],
             capture_output=True,
         )
+    except Exception as e:
+        log.error("set_clipboard_text failed: %s", e)
 
 
 # ── 文件名 & 路径 ─────────────────────────────────────
@@ -142,8 +158,8 @@ def show_notification(title, message):
         from win10toast_click import ToastNotifier
         ToastNotifier().show_toast(title, message, duration=3, threaded=True)
         return
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("win10toast failed: %s", e)
     try:
         import base64
         safe_title = str(title).replace("'", "''")
@@ -162,33 +178,37 @@ def show_notification(title, message):
             ["powershell", "-EncodedCommand", encoded],
             capture_output=True, timeout=5,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("powershell notification failed: %s", e)
 
 
 # ── 核心上传动作 ──────────────────────────────────────
 def do_upload(cfg):
-    image_data = get_clipboard_image()
-    if not image_data:
-        show_notification("Clip Upload", "剪贴板中没有图片，请先截图")
-        return
-
-    filename = generate_filename(cfg)
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        f.write(image_data)
-        temp_path = f.name
-
     try:
-        upload_file(temp_path, cfg, filename)
-    except Exception as e:
-        show_notification("Clip Upload", f"上传失败: {e}")
-        return
-    finally:
-        os.unlink(temp_path)
+        image_data = get_clipboard_image()
+        if not image_data:
+            show_notification("Clip Upload", "剪贴板中没有图片，请先截图")
+            return
 
-    content = build_clipboard_content(cfg, filename)
-    set_clipboard_text(content)
-    show_notification("Clip Upload", content)
+        filename = generate_filename(cfg)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(image_data)
+            temp_path = f.name
+
+        try:
+            upload_file(temp_path, cfg, filename)
+        except Exception as e:
+            show_notification("Clip Upload", f"上传失败: {e}")
+            return
+        finally:
+            os.unlink(temp_path)
+
+        content = build_clipboard_content(cfg, filename)
+        set_clipboard_text(content)
+        show_notification("Clip Upload", content)
+        log.info("uploaded: %s", content)
+    except Exception as e:
+        log.error("do_upload error: %s\n%s", e, traceback.format_exc())
 
 
 # ── 自动更新 ──────────────────────────────────────────
@@ -243,12 +263,12 @@ def do_update(info, on_quit):
                     f.write(chunk)
 
         bat = f"""@echo off
-chcp 65001 >nul
+chcp 65001 >/dev/null
 echo 正在更新 ClipUpload...
 :retry
 del "{exe_path}"
 if exist "{exe_path}" (
-    timeout /t 1 /nobreak >nul
+    timeout /t 1 /nobreak >/dev/null
     goto retry
 )
 move /y "{new_exe}" "{exe_path}"
@@ -266,6 +286,7 @@ del "%~f0"
         on_quit()
     except Exception as e:
         show_notification("Clip Upload", f"更新失败: {e}")
+        log.error("do_update failed: %s", e)
 
 
 def auto_update_check(cfg, on_quit):
@@ -354,14 +375,12 @@ class SettingsDialog:
         def add_label(text, r):
             ttk.Label(main, text=text).grid(row=r, column=0, sticky="w", pady=6)
 
-        # 版本信息
         header = ttk.Frame(main)
         header.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         ttk.Label(header, text="Clip Upload", font=("", 14, "bold")).pack(side="left")
         ttk.Label(header, text=f"  v{__version__}", foreground="gray").pack(side="left")
         row += 1
 
-        # 服务器
         add_label("服务器地址:", row)
         self.server_var = tk.StringVar(value=cfg.get("server", ""))
         ttk.Entry(main, textvariable=self.server_var, width=40).grid(
@@ -369,7 +388,6 @@ class SettingsDialog:
         )
         row += 1
 
-        # 远程路径
         add_label("远程路径:", row)
         self.path_var = tk.StringVar(value=cfg.get("remote_path", ""))
         ttk.Entry(main, textvariable=self.path_var, width=40).grid(
@@ -377,7 +395,6 @@ class SettingsDialog:
         )
         row += 1
 
-        # URL 前缀
         add_label("URL 前缀:", row)
         self.url_var = tk.StringVar(value=cfg.get("url_prefix", ""))
         ttk.Entry(main, textvariable=self.url_var, width=40).grid(
@@ -385,7 +402,6 @@ class SettingsDialog:
         )
         row += 1
 
-        # 粘贴板格式
         add_label("粘贴板格式:", row)
         self.fmt_var = tk.StringVar(value=cfg.get("clipboard_format", "path"))
         fmt_frame = ttk.Frame(main)
@@ -396,7 +412,6 @@ class SettingsDialog:
             )
         row += 1
 
-        # 文件命名
         add_label("文件命名:", row)
         self.name_var = tk.StringVar(value=cfg.get("file_naming", "datetime"))
         name_frame = ttk.Frame(main)
@@ -409,7 +424,6 @@ class SettingsDialog:
         )
         row += 1
 
-        # 快捷键
         add_label("快捷键:", row)
         self.hotkey_var = tk.StringVar(value=cfg.get("hotkey", "ctrl+alt+u"))
         ttk.Entry(main, textvariable=self.hotkey_var, width=20).grid(
@@ -417,14 +431,12 @@ class SettingsDialog:
         )
         row += 1
 
-        # 自动更新
         self.auto_update_var = tk.BooleanVar(value=cfg.get("auto_update", True))
         ttk.Checkbutton(main, text="自动检查更新（每天一次）", variable=self.auto_update_var).grid(
             row=row, column=0, columnspan=2, sticky="w", pady=6
         )
         row += 1
 
-        # 按钮
         btn_frame = ttk.Frame(main)
         btn_frame.grid(row=row, column=0, columnspan=2, pady=16)
         ttk.Button(btn_frame, text="保存", command=self._save, width=12).pack(side="left", padx=8)
@@ -454,7 +466,8 @@ def create_tray_icon(cfg, on_quit):
     try:
         import pystray
         from PIL import Image, ImageDraw
-    except ImportError:
+    except ImportError as e:
+        log.error("pystray import failed: %s", e)
         return None
 
     def make_icon():
@@ -473,7 +486,6 @@ def create_tray_icon(cfg, on_quit):
             d = SettingsDialog(cfg)
             d.show()
             cfg.update(load_config())
-
         threading.Thread(target=open_settings, daemon=True).start()
 
     def on_open(icon, item):
@@ -491,8 +503,10 @@ def create_tray_icon(cfg, on_quit):
                 d.show()
             else:
                 show_notification("Clip Upload", f"已是最新版本 v{__version__}")
-
         threading.Thread(target=check, daemon=True).start()
+
+    def on_open_log(icon, item):
+        os.startfile(str(LOG_PATH))
 
     icon = pystray.Icon(
         "clip-upload",
@@ -503,6 +517,7 @@ def create_tray_icon(cfg, on_quit):
             pystray.MenuItem("设置...", on_settings),
             pystray.MenuItem("检查更新...", on_check_update),
             pystray.MenuItem("打开配置文件", on_open),
+            pystray.MenuItem("打开日志", on_open_log),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", lambda icon, item: (icon.stop(), on_quit())),
         ),
@@ -512,30 +527,31 @@ def create_tray_icon(cfg, on_quit):
 
 # ── 主入口 ────────────────────────────────────────────
 def main():
+    log.info("ClipUpload v%s starting", __version__)
+    log.info("exe: %s", sys.executable)
+    log.info("config: %s", CONFIG_PATH)
+
     cfg = load_config()
     hotkey = cfg.get("hotkey", "ctrl+alt+u")
     quit_event = lambda: os._exit(0)
 
-    print(f"[Clip Upload] v{__version__} | 服务器: {cfg['server']} | 路径: {cfg['remote_path']}")
-    print(f"[Clip Upload] 快捷键: {hotkey}")
+    log.info("server=%s path=%s hotkey=%s", cfg["server"], cfg["remote_path"], hotkey)
 
-    # 注册全局快捷键
     try:
         import keyboard
         keyboard.add_hotkey(hotkey, lambda: do_upload(cfg), suppress=False)
-        print("[Clip Upload] 快捷键已注册")
+        log.info("hotkey registered: %s", hotkey)
     except Exception as e:
-        print(f"[Clip Upload] 快捷键注册失败: {e}")
+        log.warning("hotkey register failed: %s", e)
 
-    # 启动后静默检查更新
     threading.Thread(target=lambda: auto_update_check(cfg, quit_event), daemon=True).start()
 
-    # 启动托盘
     icon = create_tray_icon(cfg, on_quit=quit_event)
     if icon:
+        log.info("starting tray icon")
         icon.run()
     else:
-        print("[Clip Upload] 托盘不可用，保持后台运行")
+        log.warning("tray unavailable, running in background")
         try:
             threading.Event().wait()
         except KeyboardInterrupt:
@@ -543,4 +559,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        log.critical("fatal: %s\n%s", e, traceback.format_exc())
