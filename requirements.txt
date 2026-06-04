@@ -2,5 +2,5 @@ PyInstaller==6.20.0
 Pillow==12.2.0
 keyboard==0.13.5
 pystray==0.19.5
-win10toast-click==1.1.0
+win10toast-click==0.1.2
 pywin32==311
