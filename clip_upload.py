@@ -85,8 +85,10 @@ def set_clipboard_text(text):
         win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
         win32clipboard.CloseClipboard()
     except Exception:
+        import base64
+        encoded = base64.b64encode(f"Set-Clipboard -Value '{text}'".encode("utf-16-le")).decode()
         subprocess.run(
-            ["powershell", "-Command", f"Set-Clipboard -Value '{text}'"],
+            ["powershell", "-EncodedCommand", encoded],
             capture_output=True,
         )
 
@@ -141,17 +143,19 @@ def show_notification(title, message):
     except Exception:
         pass
     try:
+        import base64
+        ps = (
+            "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
+            f"$n = New-Object System.Windows.Forms.NotifyIcon; "
+            f"$n.Icon = [System.Drawing.SystemIcons]::Information; "
+            f"$n.Visible = $true; "
+            f"$n.ShowBalloonTip(3000, '{title}', '{message}', 'Info'); "
+            f"Start-Sleep -Seconds 3; "
+            f"$n.Dispose()"
+        )
+        encoded = base64.b64encode(ps.encode("utf-16-le")).decode()
         subprocess.run(
-            [
-                "powershell", "-Command",
-                f"[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
-                f"$n = New-Object System.Windows.Forms.NotifyIcon; "
-                f"$n.Icon = [System.Drawing.SystemIcons]::Information; "
-                f"$n.Visible = $true; "
-                f"$n.ShowBalloonTip(3000, '{title}', '{message}', 'Info'); "
-                f"Start-Sleep -Seconds 3; "
-                f"$n.Dispose()",
-            ],
+            ["powershell", "-EncodedCommand", encoded],
             capture_output=True, timeout=5,
         )
     except Exception:
@@ -270,10 +274,12 @@ def auto_update_check(cfg, on_quit):
     save_config(cfg)
     info = check_for_update(silent=True)
     if info:
-        show_notification(
-            "Clip Upload",
-            f"发现新版本 {info['version']}，右键托盘图标 → 检查更新",
+        d = UpdateDialog(
+            info,
+            on_update=lambda: do_update(info, on_quit),
+            on_skip=lambda: None,
         )
+        d.show()
 
 
 # ── 更新确认对话框 ────────────────────────────────────
