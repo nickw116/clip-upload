@@ -1,5 +1,6 @@
-Pillow>=10.0
-keyboard>=0.13
-pystray>=0.19
-win10toast>=0.9
-pywin32>=306
+PyInstaller==6.20.0
+Pillow==12.2.0
+keyboard==0.13.5
+pystray==0.19.5
+win10toast==0.9
+pywin32==311
