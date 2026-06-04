@@ -1,0 +1,39 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyinstaller Pillow keyboard pystray win10toast pywin32
+
+      - name: Build exe
+        run: |
+          pyinstaller --noconfirm --onefile --windowed ^
+            --name=ClipUpload ^
+            --hidden-import=keyboard ^
+            --hidden-import=pystray ^
+            --hidden-import=win10toast ^
+            --hidden-import=win32clipboard ^
+            --hidden-import=win32con ^
+            --hidden-import=PIL.ImageGrab ^
+            clip_upload.py
+        shell: cmd
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ClipUpload.exe
+          generate_release_notes: true
