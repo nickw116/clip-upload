@@ -86,7 +86,9 @@ def set_clipboard_text(text):
         win32clipboard.CloseClipboard()
     except Exception:
         import base64
-        encoded = base64.b64encode(f"Set-Clipboard -Value '{text}'".encode("utf-16-le")).decode()
+        safe = text.replace("'", "''")
+        ps_cmd = f"Set-Clipboard -Value '{safe}'"
+        encoded = base64.b64encode(ps_cmd.encode("utf-16-le")).decode()
         subprocess.run(
             ["powershell", "-EncodedCommand", encoded],
             capture_output=True,
@@ -144,12 +146,14 @@ def show_notification(title, message):
         pass
     try:
         import base64
+        safe_title = str(title).replace("'", "''")
+        safe_msg = str(message).replace("'", "''")
         ps = (
             "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
             f"$n = New-Object System.Windows.Forms.NotifyIcon; "
             f"$n.Icon = [System.Drawing.SystemIcons]::Information; "
             f"$n.Visible = $true; "
-            f"$n.ShowBalloonTip(3000, '{title}', '{message}', 'Info'); "
+            f"$n.ShowBalloonTip(3000, '{safe_title}', '{safe_msg}', 'Info'); "
             f"Start-Sleep -Seconds 3; "
             f"$n.Dispose()"
         )
