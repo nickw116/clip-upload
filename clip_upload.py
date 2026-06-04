@@ -21,7 +21,7 @@ from pathlib import Path
 from tkinter import ttk
 import tkinter as tk
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -44,7 +44,11 @@ else:
     APP_DIR = Path(__file__).parent
 
 DEFAULT_CONFIG = {
-    "server": "user@your-server.com",
+    "server": "",
+    "port": 22,
+    "username": "",
+    "password": "",
+    "ssh_key": "",
     "remote_path": "/var/www/images",
     "url_prefix": "",
     "file_naming": "datetime",
@@ -134,22 +138,62 @@ def build_clipboard_content(cfg, filename):
 
 # ── 上传 ──────────────────────────────────────────────
 def upload_file(local_path, cfg, filename):
-    server = cfg["server"]
+    server = cfg.get("server", "").strip()
     remote_path = cfg["remote_path"].rstrip("/")
     dest = f"{remote_path}/{filename}"
 
-    if server in ("localhost", "127.0.0.1", "local"):
+    # 本地模式
+    if not server or server in ("localhost", "127.0.0.1", "local"):
         os.makedirs(remote_path.replace("/", os.sep), exist_ok=True)
         shutil.copy2(local_path, dest.replace("/", os.sep))
-    else:
-        full_remote = f"{server}:{dest}"
-        r = subprocess.run(
-            ["scp", "-q", "-o", "ConnectTimeout=10", local_path, full_remote],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(r.stderr.strip())
-    return dest
+        return dest
+
+    # SFTP 上传 (paramiko)
+    import paramiko
+
+    port = int(cfg.get("port", 22))
+    username = cfg.get("username", "").strip()
+    password = cfg.get("password", "")
+    ssh_key = cfg.get("ssh_key", "").strip()
+
+    transport = None
+    try:
+        transport = paramiko.Transport((server, port))
+        if ssh_key and os.path.isfile(ssh_key):
+            pkey = paramiko.AutoAddPolicy()
+            key = paramiko.RSAKey.from_private_key_file(ssh_key)
+            transport.connect(username=username, pkey=key)
+        elif ssh_key and os.path.isfile(ssh_key):
+            key = paramiko.Ed25519Key.from_private_key_file(ssh_key)
+            transport.connect(username=username, pkey=key)
+        else:
+            transport.connect(username=username, password=password)
+
+        sftp = paramiko.SFTPClient.from_transport(transport)
+
+        # 确保远程目录存在
+        dirs_to_create = []
+        d = remote_path
+        while d and d != "/":
+            dirs_to_create.append(d)
+            d = "/".join(d.split("/")[:-1])
+        dirs_to_create.reverse()
+
+        for d in dirs_to_create:
+            try:
+                sftp.stat(d)
+            except IOError:
+                try:
+                    sftp.mkdir(d)
+                except IOError:
+                    pass
+
+        sftp.put(local_path, dest)
+        log.info("SFTP uploaded to %s:%s", server, dest)
+        return dest
+    finally:
+        if transport:
+            transport.close()
 
 
 # ── 通知 ──────────────────────────────────────────────
@@ -362,7 +406,7 @@ class SettingsDialog:
         self.root.resizable(False, False)
         self.root.configure(bg="#f5f5f5")
 
-        w, h = 500, 440
+        w, h = 520, 540
         x = (self.root.winfo_screenwidth() - w) // 2
         y = (self.root.winfo_screenheight() - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
@@ -373,49 +417,97 @@ class SettingsDialog:
         row = 0
 
         def add_label(text, r):
-            ttk.Label(main, text=text).grid(row=r, column=0, sticky="w", pady=6)
+            ttk.Label(main, text=text).grid(row=r, column=0, sticky="w", pady=5)
 
+        # 版本标题
         header = ttk.Frame(main)
-        header.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        header.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         ttk.Label(header, text="Clip Upload", font=("", 14, "bold")).pack(side="left")
         ttk.Label(header, text=f"  v{__version__}", foreground="gray").pack(side="left")
         row += 1
 
+        # 服务器地址
         add_label("服务器地址:", row)
         self.server_var = tk.StringVar(value=cfg.get("server", ""))
-        ttk.Entry(main, textvariable=self.server_var, width=40).grid(
-            row=row, column=1, sticky="ew", pady=6, padx=(10, 0)
+        ttk.Entry(main, textvariable=self.server_var, width=38).grid(
+            row=row, column=1, sticky="ew", pady=5, padx=(10, 0)
         )
         row += 1
 
+        # 端口
+        add_label("端口:", row)
+        self.port_var = tk.StringVar(value=str(cfg.get("port", 22)))
+        ttk.Entry(main, textvariable=self.port_var, width=10).grid(
+            row=row, column=1, sticky="w", pady=5, padx=(10, 0)
+        )
+        row += 1
+
+        # 用户名
+        add_label("用户名:", row)
+        self.username_var = tk.StringVar(value=cfg.get("username", ""))
+        ttk.Entry(main, textvariable=self.username_var, width=38).grid(
+            row=row, column=1, sticky="ew", pady=5, padx=(10, 0)
+        )
+        row += 1
+
+        # 密码
+        add_label("密码:", row)
+        self.password_var = tk.StringVar(value=cfg.get("password", ""))
+        self.pwd_entry = ttk.Entry(main, textvariable=self.password_var, width=38, show="*")
+        self.pwd_entry.grid(row=row, column=1, sticky="ew", pady=5, padx=(10, 0))
+        self.show_pwd_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            main, text="显示", variable=self.show_pwd_var, command=self._toggle_pwd
+        ).grid(row=row, column=1, sticky="e", padx=(10, 0))
+        row += 1
+
+        # SSH 密钥
+        add_label("SSH 密钥:", row)
+        key_frame = ttk.Frame(main)
+        key_frame.grid(row=row, column=1, sticky="ew", pady=5, padx=(10, 0))
+        self.key_var = tk.StringVar(value=cfg.get("ssh_key", ""))
+        ttk.Entry(key_frame, textvariable=self.key_var, width=28).pack(side="left", fill="x", expand=True)
+        ttk.Button(key_frame, text="浏览", command=self._browse_key, width=6).pack(side="left", padx=(4, 0))
+        row += 1
+
+        # 分隔线
+        ttk.Separator(main, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=8
+        )
+        row += 1
+
+        # 远程路径
         add_label("远程路径:", row)
         self.path_var = tk.StringVar(value=cfg.get("remote_path", ""))
-        ttk.Entry(main, textvariable=self.path_var, width=40).grid(
-            row=row, column=1, sticky="ew", pady=6, padx=(10, 0)
+        ttk.Entry(main, textvariable=self.path_var, width=38).grid(
+            row=row, column=1, sticky="ew", pady=5, padx=(10, 0)
         )
         row += 1
 
+        # URL 前缀
         add_label("URL 前缀:", row)
         self.url_var = tk.StringVar(value=cfg.get("url_prefix", ""))
-        ttk.Entry(main, textvariable=self.url_var, width=40).grid(
-            row=row, column=1, sticky="ew", pady=6, padx=(10, 0)
+        ttk.Entry(main, textvariable=self.url_var, width=38).grid(
+            row=row, column=1, sticky="ew", pady=5, padx=(10, 0)
         )
         row += 1
 
+        # 粘贴板格式
         add_label("粘贴板格式:", row)
         self.fmt_var = tk.StringVar(value=cfg.get("clipboard_format", "path"))
         fmt_frame = ttk.Frame(main)
-        fmt_frame.grid(row=row, column=1, sticky="w", pady=6, padx=(10, 0))
+        fmt_frame.grid(row=row, column=1, sticky="w", pady=5, padx=(10, 0))
         for val, label in [("path", "服务器路径"), ("url", "HTTP URL"), ("markdown", "Markdown")]:
             ttk.Radiobutton(fmt_frame, text=label, variable=self.fmt_var, value=val).pack(
                 side="left", padx=(0, 12)
             )
         row += 1
 
+        # 文件命名
         add_label("文件命名:", row)
         self.name_var = tk.StringVar(value=cfg.get("file_naming", "datetime"))
         name_frame = ttk.Frame(main)
-        name_frame.grid(row=row, column=1, sticky="w", pady=6, padx=(10, 0))
+        name_frame.grid(row=row, column=1, sticky="w", pady=5, padx=(10, 0))
         ttk.Radiobutton(name_frame, text="日期时间", variable=self.name_var, value="datetime").pack(
             side="left", padx=(0, 12)
         )
@@ -424,28 +516,46 @@ class SettingsDialog:
         )
         row += 1
 
+        # 快捷键
         add_label("快捷键:", row)
         self.hotkey_var = tk.StringVar(value=cfg.get("hotkey", "ctrl+alt+u"))
         ttk.Entry(main, textvariable=self.hotkey_var, width=20).grid(
-            row=row, column=1, sticky="w", pady=6, padx=(10, 0)
+            row=row, column=1, sticky="w", pady=5, padx=(10, 0)
         )
         row += 1
 
+        # 自动更新
         self.auto_update_var = tk.BooleanVar(value=cfg.get("auto_update", True))
         ttk.Checkbutton(main, text="自动检查更新（每天一次）", variable=self.auto_update_var).grid(
-            row=row, column=0, columnspan=2, sticky="w", pady=6
+            row=row, column=0, columnspan=2, sticky="w", pady=5
         )
         row += 1
 
+        # 按钮
         btn_frame = ttk.Frame(main)
-        btn_frame.grid(row=row, column=0, columnspan=2, pady=16)
+        btn_frame.grid(row=row, column=0, columnspan=2, pady=12)
         ttk.Button(btn_frame, text="保存", command=self._save, width=12).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="取消", command=self.root.destroy, width=12).pack(side="left", padx=8)
 
         main.columnconfigure(1, weight=1)
 
+    def _toggle_pwd(self):
+        self.pwd_entry.config(show="" if self.show_pwd_var.get() else "*")
+
+    def _browse_key(self):
+        path = tk.filedialog.askopenfilename(
+            title="选择 SSH 私钥文件",
+            filetypes=[("所有文件", "*.*"), ("PEM", "*.pem"), ("PPK", "*.ppk")],
+        )
+        if path:
+            self.key_var.set(path)
+
     def _save(self):
         self.cfg["server"] = self.server_var.get().strip()
+        self.cfg["port"] = int(self.port_var.get().strip() or 22)
+        self.cfg["username"] = self.username_var.get().strip()
+        self.cfg["password"] = self.password_var.get()
+        self.cfg["ssh_key"] = self.key_var.get().strip()
         self.cfg["remote_path"] = self.path_var.get().strip()
         self.cfg["url_prefix"] = self.url_var.get().strip()
         self.cfg["clipboard_format"] = self.fmt_var.get()
@@ -535,7 +645,8 @@ def main():
     hotkey = cfg.get("hotkey", "ctrl+alt+u")
     quit_event = lambda: os._exit(0)
 
-    log.info("server=%s path=%s hotkey=%s", cfg["server"], cfg["remote_path"], hotkey)
+    log.info("server=%s port=%s user=%s path=%s",
+             cfg.get("server"), cfg.get("port"), cfg.get("username"), cfg.get("remote_path"))
 
     try:
         import keyboard
