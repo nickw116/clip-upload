@@ -446,29 +446,29 @@ class UpdateDialog:
         self.root.title("Clip Upload 更新")
         self.root.resizable(False, False)
         self.root.configure(bg="#f5f5f5")
-        w, h = 400, 220
+        w, h = 500, 280
         x = (self.root.winfo_screenwidth() - w) // 2
         y = (self.root.winfo_screenheight() - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         self.on_update = on_update
         self.on_skip = on_skip
 
-        main = ttk.Frame(self.root, padding=20)
+        main = ttk.Frame(self.root, padding=24)
         main.pack(fill="both", expand=True)
 
-        ttk.Label(main, text=f"发现新版本: {info['version']}", font=("", 12, "bold")).pack(anchor="w")
-        ttk.Label(main, text=f"当前版本: v{__version__}").pack(anchor="w", pady=(4, 8))
+        ttk.Label(main, text=f"发现新版本: {info['version']}", font=("", 13, "bold")).pack(anchor="w")
+        ttk.Label(main, text=f"当前版本: v{__version__}").pack(anchor="w", pady=(4, 12))
         if info.get("notes"):
             ttk.Label(main, text="更新内容:").pack(anchor="w")
-            txt = tk.Text(main, height=4, width=45, wrap="word")
-            txt.insert("1.0", info["notes"][:200])
+            txt = tk.Text(main, height=4, width=52, wrap="word")
+            txt.insert("1.0", info["notes"][:300])
             txt.config(state="disabled")
-            txt.pack(fill="x", pady=4)
+            txt.pack(fill="x", pady=6)
 
         btn = ttk.Frame(main)
-        btn.pack(pady=12)
-        ttk.Button(btn, text="立即更新", command=self._do_update, width=10).pack(side="left", padx=6)
-        ttk.Button(btn, text="跳过", command=self._do_skip, width=10).pack(side="left", padx=6)
+        btn.pack(pady=16)
+        ttk.Button(btn, text="立即更新", command=self._do_update, width=14).pack(side="left", padx=12)
+        ttk.Button(btn, text="跳过", command=self._do_skip, width=14).pack(side="left", padx=12)
 
     def _do_update(self):
         self.root.destroy()
