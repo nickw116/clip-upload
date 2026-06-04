@@ -2,7 +2,7 @@
 """
 剪贴板图片上传工具 (Windows)
 后台运行，按 Ctrl+Alt+U 上传当前剪贴板图片到服务器，路径自动写回剪贴板。
-托盘图标，右键退出 / 打开设置 / 检查更新。
+托盘图标，右键退出 / 切换服务器 / 打开设置 / 检查更新。
 """
 
 import io
@@ -22,7 +22,7 @@ from pathlib import Path
 from tkinter import ttk
 import tkinter as tk
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -72,7 +72,8 @@ if getattr(sys, "frozen", False):
 else:
     APP_DIR = Path(__file__).parent
 
-DEFAULT_CONFIG = {
+# 每个 profile 的字段
+PROFILE_FIELDS = {
     "server": "",
     "port": 22,
     "username": "",
@@ -80,12 +81,24 @@ DEFAULT_CONFIG = {
     "ssh_key": "",
     "remote_path": "/var/www/images",
     "url_prefix": "",
+    "clipboard_format": "path",
+}
+
+# 全局设置字段
+GLOBAL_FIELDS = {
     "file_naming": "datetime",
     "image_format": "png",
-    "clipboard_format": "path",
     "hotkey": "ctrl+alt+u",
     "auto_update": True,
     "last_check": "",
+}
+
+DEFAULT_CONFIG = {
+    "active_profile": "default",
+    "profiles": {
+        "default": dict(PROFILE_FIELDS),
+    },
+    "global": dict(GLOBAL_FIELDS),
 }
 
 
@@ -93,17 +106,47 @@ def load_config():
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, encoding="utf-8") as f:
             cfg = json.load(f)
-            for k, v in DEFAULT_CONFIG.items():
-                cfg.setdefault(k, v)
-            return cfg
+        # 向前兼容: 从旧格式迁移
+        if "profiles" not in cfg:
+            old = {k: v for k, v in cfg.items() if k not in GLOBAL_FIELDS}
+            glob = {k: v for k, v in cfg.items() if k in GLOBAL_FIELDS}
+            cfg = {
+                "active_profile": "default",
+                "profiles": {"default": {**PROFILE_FIELDS, **old}},
+                "global": {**GLOBAL_FIELDS, **glob},
+            }
+            save_config(cfg)
+            log.info("migrated old config to profile format")
+        # 补齐缺失字段
+        for name, prof in cfg.get("profiles", {}).items():
+            for k, v in PROFILE_FIELDS.items():
+                prof.setdefault(k, v)
+        for k, v in GLOBAL_FIELDS.items():
+            cfg.setdefault("global", {})
+            cfg["global"].setdefault(k, v)
+        return cfg
     save_config(DEFAULT_CONFIG)
-    return DEFAULT_CONFIG.copy()
+    return json.loads(json.dumps(DEFAULT_CONFIG))
 
 
 def save_config(cfg):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
+def get_active_profile(cfg):
+    """返回当前激活的 profile 字典"""
+    name = cfg.get("active_profile", "default")
+    return cfg["profiles"].get(name, dict(PROFILE_FIELDS))
+
+
+def get_merged_config(cfg):
+    """返回 profile + global 合并后的配置，用于上传"""
+    prof = get_active_profile(cfg)
+    merged = {**prof, **cfg.get("global", {})}
+    merged["_profile_name"] = cfg.get("active_profile", "default")
+    return merged
 
 
 # ── 剪贴板 ────────────────────────────────────────────
@@ -205,7 +248,6 @@ def upload_file(local_path, cfg, filename):
 
         sftp = paramiko.SFTPClient.from_transport(transport)
 
-        # 确保远程目录存在
         dirs_to_create = []
         d = remote_path
         while d and d != "/":
@@ -230,25 +272,8 @@ def upload_file(local_path, cfg, filename):
             transport.close()
 
 
-# ── 通知 (纯 tkinter, 不依赖 pkg_resources) ──────────
+# ── 通知 ──────────────────────────────────────────────
 def show_notification(title, message):
-    # 用 tkinter 弹窗替代 win10toast，避免 pkg_resources 依赖
-    def _show():
-        try:
-            root = tk.Tk()
-            root.withdraw()
-            root.after(3000, root.destroy)
-            try:
-                from tkinter import messagebox
-                # 不用 messagebox, 用一个无边框小窗口
-                pass
-            except Exception:
-                pass
-            root.mainloop()
-        except Exception:
-            pass
-
-    # 尝试系统托盘气泡通知
     try:
         import ctypes
         ctypes.windll.user32.MessageBoxTimeoutW(
@@ -257,8 +282,6 @@ def show_notification(title, message):
         return
     except Exception:
         pass
-
-    # 最终 fallback: PowerShell 通知
     try:
         import base64
         safe_title = str(title).replace("'", "''").replace("\n", " ")[:100]
@@ -284,18 +307,18 @@ def show_notification(title, message):
 # ── 核心上传动作 ──────────────────────────────────────
 def do_upload(cfg):
     try:
-        # 检查配置
-        server = cfg.get("server", "").strip()
-        if not server:
-            show_notification("Clip Upload", "请先配置服务器信息：右键托盘图标 → 设置")
-            return
+        merged = get_merged_config(cfg)
 
-        username = cfg.get("username", "").strip()
-        password = cfg.get("password", "")
-        ssh_key = cfg.get("ssh_key", "").strip()
+        server = merged.get("server", "").strip()
+        if not server:
+            show_notification("Clip Upload", "请先配置服务器：右键托盘图标 → 设置")
+            return
+        username = merged.get("username", "").strip()
         if not username:
             show_notification("Clip Upload", "请先配置用户名：右键托盘图标 → 设置")
             return
+        password = merged.get("password", "")
+        ssh_key = merged.get("ssh_key", "").strip()
         if not password and not ssh_key:
             show_notification("Clip Upload", "请先配置密码或 SSH 密钥：右键托盘图标 → 设置")
             return
@@ -305,13 +328,13 @@ def do_upload(cfg):
             show_notification("Clip Upload", "剪贴板中没有图片，请先截图")
             return
 
-        filename = generate_filename(cfg)
+        filename = generate_filename(merged)
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(image_data)
             temp_path = f.name
 
         try:
-            upload_file(temp_path, cfg, filename)
+            upload_file(temp_path, merged, filename)
         except Exception as e:
             log.error("upload failed: %s\n%s", e, traceback.format_exc())
             show_notification("Clip Upload", f"上传失败: {e}")
@@ -319,10 +342,12 @@ def do_upload(cfg):
         finally:
             os.unlink(temp_path)
 
-        content = build_clipboard_content(cfg, filename)
+        content = build_clipboard_content(merged, filename)
         set_clipboard_text(content)
-        show_notification("Clip Upload", content)
-        log.info("uploaded: %s", content)
+        profile_name = merged.get("_profile_name", "")
+        label = f"[{profile_name}] " if profile_name else ""
+        show_notification("Clip Upload", f"{label}{content}")
+        log.info("uploaded [%s]: %s", profile_name, content)
     except Exception as e:
         log.error("do_upload error: %s\n%s", e, traceback.format_exc())
 
@@ -341,20 +366,14 @@ def check_for_update(silent=True):
         tag = data.get("tag_name", "")
         if not tag:
             return None
-        remote_ver = parse_version(tag)
-        local_ver = parse_version(__version__)
-        if remote_ver <= local_ver:
+        if parse_version(tag) <= parse_version(__version__):
             if not silent:
                 show_notification("Clip Upload", f"已是最新版本 v{__version__}")
             return None
-        asset_url = None
         for a in data.get("assets", []):
             if a["name"] == "ClipUpload.exe":
-                asset_url = a["browser_download_url"]
-                break
-        if not asset_url:
-            return None
-        return {"version": tag, "url": asset_url, "notes": data.get("body", "")}
+                return {"version": tag, "url": a["browser_download_url"], "notes": data.get("body", "")}
+        return None
     except Exception as e:
         if not silent:
             show_notification("Clip Upload", f"检查更新失败: {e}")
@@ -366,7 +385,7 @@ def do_update(info, on_quit):
         import urllib.request
         exe_path = Path(sys.executable)
         new_exe = CONFIG_DIR / "ClipUpload_new.exe"
-        updater = CONFIG_DIR / "updater.bat"
+        updater_bat = CONFIG_DIR / "updater.bat"
 
         show_notification("Clip Upload", f"正在下载 v{info['version']}...")
 
@@ -391,11 +410,11 @@ move /y "{new_exe}" "{exe_path}"
 start "" "{exe_path}"
 del "%~f0"
 """
-        with open(updater, "w", encoding="utf-8") as f:
+        with open(updater_bat, "w", encoding="utf-8") as f:
             f.write(bat)
 
         subprocess.Popen(
-            ["cmd", "/c", str(updater)],
+            ["cmd", "/c", str(updater_bat)],
             creationflags=subprocess.CREATE_NO_WINDOW,
             close_fds=True,
         )
@@ -406,20 +425,17 @@ del "%~f0"
 
 
 def auto_update_check(cfg, on_quit):
-    if not cfg.get("auto_update", True):
+    glob = cfg.get("global", {})
+    if not glob.get("auto_update", True):
         return
     today = datetime.now().strftime("%Y-%m-%d")
-    if cfg.get("last_check") == today:
+    if glob.get("last_check") == today:
         return
-    cfg["last_check"] = today
+    glob["last_check"] = today
     save_config(cfg)
     info = check_for_update(silent=True)
     if info:
-        d = UpdateDialog(
-            info,
-            on_update=lambda: do_update(info, on_quit),
-            on_skip=lambda: None,
-        )
+        d = UpdateDialog(info, on_update=lambda: do_update(info, on_quit), on_skip=lambda: None)
         d.show()
 
 
@@ -434,183 +450,262 @@ class UpdateDialog:
         x = (self.root.winfo_screenwidth() - w) // 2
         y = (self.root.winfo_screenheight() - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
+        self.on_update = on_update
+        self.on_skip = on_skip
 
         main = ttk.Frame(self.root, padding=20)
         main.pack(fill="both", expand=True)
 
-        ttk.Label(main, text=f"发现新版本: {info['version']}", font=("", 12, "bold")).pack(
-            anchor="w"
-        )
+        ttk.Label(main, text=f"发现新版本: {info['version']}", font=("", 12, "bold")).pack(anchor="w")
         ttk.Label(main, text=f"当前版本: v{__version__}").pack(anchor="w", pady=(4, 8))
         if info.get("notes"):
-            notes = info["notes"][:200]
             ttk.Label(main, text="更新内容:").pack(anchor="w")
-            txt = tk.Text(main, height=4, width=45, wrap="word", state="normal")
-            txt.insert("1.0", notes)
+            txt = tk.Text(main, height=4, width=45, wrap="word")
+            txt.insert("1.0", info["notes"][:200])
             txt.config(state="disabled")
             txt.pack(fill="x", pady=4)
 
         btn = ttk.Frame(main)
         btn.pack(pady=12)
-        ttk.Button(btn, text="立即更新", command=lambda: self._do(on_update), width=10).pack(
-            side="left", padx=6
-        )
-        ttk.Button(btn, text="跳过", command=lambda: self._do(on_skip), width=10).pack(
-            side="left", padx=6
-        )
+        ttk.Button(btn, text="立即更新", command=self._do_update, width=10).pack(side="left", padx=6)
+        ttk.Button(btn, text="跳过", command=self._do_skip, width=10).pack(side="left", padx=6)
 
-    def _do(self, cb):
+    def _do_update(self):
         self.root.destroy()
-        cb()
+        self.on_update()
+
+    def _do_skip(self):
+        self.root.destroy()
+        self.on_skip()
 
     def show(self):
         self.root.mainloop()
 
 
-# ── 设置窗口 ──────────────────────────────────────────
+# ── 设置窗口 (多 Profile) ────────────────────────────
 class SettingsDialog:
     def __init__(self, cfg, on_save=None):
         self.cfg = cfg
         self.on_save = on_save
+        self.profiles = json.loads(json.dumps(cfg.get("profiles", {})))
+        self.active = cfg.get("active_profile", "default")
 
         self.root = tk.Tk()
         self.root.title("Clip Upload 设置")
         self.root.resizable(False, False)
         self.root.configure(bg="#f5f5f5")
 
-        w, h = 520, 560
+        w, h = 540, 600
         x = (self.root.winfo_screenwidth() - w) // 2
         y = (self.root.winfo_screenheight() - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
-        main = ttk.Frame(self.root, padding=20)
+        main = ttk.Frame(self.root, padding=15)
         main.pack(fill="both", expand=True)
+
+        # ── 标题 ──
+        header = ttk.Frame(main)
+        header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        ttk.Label(header, text="Clip Upload", font=("", 14, "bold")).pack(side="left")
+        ttk.Label(header, text=f"  v{__version__}", foreground="gray").pack(side="left")
+
+        # ── Profile 选择器 ──
+        sel_frame = ttk.LabelFrame(main, text="服务器配置", padding=8)
+        sel_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+
+        ttk.Label(sel_frame, text="当前:").grid(row=0, column=0, sticky="w")
+        self.profile_var = tk.StringVar(value=self.active)
+        self.profile_combo = ttk.Combobox(
+            sel_frame, textvariable=self.profile_var,
+            values=list(self.profiles.keys()), state="readonly", width=20
+        )
+        self.profile_combo.grid(row=0, column=1, padx=6)
+        self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_switch)
+
+        ttk.Button(sel_frame, text="+ 新建", command=self._add_profile, width=6).grid(
+            row=0, column=2, padx=2
+        )
+        ttk.Button(sel_frame, text="重命名", command=self._rename_profile, width=6).grid(
+            row=0, column=3, padx=2
+        )
+        ttk.Button(sel_frame, text="删除", command=self._delete_profile, width=6).grid(
+            row=0, column=4, padx=2
+        )
+
+        # ── 服务器字段 ──
+        fields_frame = ttk.LabelFrame(main, text="连接设置", padding=8)
+        fields_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=4)
 
         row = 0
 
-        def add_label(text, r):
-            ttk.Label(main, text=text).grid(row=r, column=0, sticky="w", pady=5)
+        def add_field(label, var_name, width=35, **kw):
+            nonlocal row
+            ttk.Label(fields_frame, text=label).grid(row=row, column=0, sticky="w", pady=3)
+            var = tk.StringVar()
+            setattr(self, var_name, var)
+            entry = ttk.Entry(fields_frame, textvariable=var, width=width, **kw)
+            entry.grid(row=row, column=1, sticky="ew", pady=3, padx=(8, 0))
+            row += 1
+            return entry
 
-        # 版本标题
-        header = ttk.Frame(main)
-        header.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        ttk.Label(header, text="Clip Upload", font=("", 14, "bold")).pack(side="left")
-        ttk.Label(header, text=f"  v{__version__}", foreground="gray").pack(side="left")
-        row += 1
+        add_field("服务器地址:", "server_var")
+        add_field("端口:", "port_var", width=8)
 
-        # 服务器地址
-        add_label("服务器地址:", row)
-        self.server_var = tk.StringVar(value=cfg.get("server", ""))
-        ttk.Entry(main, textvariable=self.server_var, width=38).grid(
-            row=row, column=1, sticky="ew", pady=5, padx=(10, 0)
+        ttk.Label(fields_frame, text="用户名:").grid(row=row, column=0, sticky="w", pady=3)
+        self.username_var = tk.StringVar()
+        ttk.Entry(fields_frame, textvariable=self.username_var, width=35).grid(
+            row=row, column=1, sticky="ew", pady=3, padx=(8, 0)
         )
         row += 1
 
-        # 端口
-        add_label("端口:", row)
-        self.port_var = tk.StringVar(value=str(cfg.get("port", 22)))
-        ttk.Entry(main, textvariable=self.port_var, width=10).grid(
-            row=row, column=1, sticky="w", pady=5, padx=(10, 0)
-        )
-        row += 1
-
-        # 用户名
-        add_label("用户名:", row)
-        self.username_var = tk.StringVar(value=cfg.get("username", ""))
-        ttk.Entry(main, textvariable=self.username_var, width=38).grid(
-            row=row, column=1, sticky="ew", pady=5, padx=(10, 0)
-        )
-        row += 1
-
-        # 密码
-        add_label("密码:", row)
-        pwd_frame = ttk.Frame(main)
-        pwd_frame.grid(row=row, column=1, sticky="ew", pady=5, padx=(10, 0))
-        self.password_var = tk.StringVar(value=cfg.get("password", ""))
-        self.pwd_entry = ttk.Entry(pwd_frame, textvariable=self.password_var, width=30, show="*")
+        # 密码 (带显示/隐藏)
+        ttk.Label(fields_frame, text="密码:").grid(row=row, column=0, sticky="w", pady=3)
+        pwd_frame = ttk.Frame(fields_frame)
+        pwd_frame.grid(row=row, column=1, sticky="ew", pady=3, padx=(8, 0))
+        self.password_var = tk.StringVar()
+        self.pwd_entry = ttk.Entry(pwd_frame, textvariable=self.password_var, width=28, show="*")
         self.pwd_entry.pack(side="left", fill="x", expand=True)
         self.show_pwd_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(pwd_frame, text="显示", variable=self.show_pwd_var,
-                        command=self._toggle_pwd).pack(side="left", padx=(6, 0))
+                        command=self._toggle_pwd).pack(side="left", padx=(4, 0))
         row += 1
 
         # SSH 密钥
-        add_label("SSH 密钥:", row)
-        key_frame = ttk.Frame(main)
-        key_frame.grid(row=row, column=1, sticky="ew", pady=5, padx=(10, 0))
-        self.key_var = tk.StringVar(value=cfg.get("ssh_key", ""))
-        ttk.Entry(key_frame, textvariable=self.key_var, width=28).pack(side="left", fill="x", expand=True)
-        ttk.Button(key_frame, text="浏览", command=self._browse_key, width=6).pack(side="left", padx=(4, 0))
+        ttk.Label(fields_frame, text="SSH 密钥:").grid(row=row, column=0, sticky="w", pady=3)
+        key_frame = ttk.Frame(fields_frame)
+        key_frame.grid(row=row, column=1, sticky="ew", pady=3, padx=(8, 0))
+        self.key_var = tk.StringVar()
+        ttk.Entry(key_frame, textvariable=self.key_var, width=26).pack(side="left", fill="x", expand=True)
+        ttk.Button(key_frame, text="浏览", command=self._browse_key, width=5).pack(side="left", padx=(4, 0))
         row += 1
 
-        # 分隔线
-        ttk.Separator(main, orient="horizontal").grid(
-            row=row, column=0, columnspan=2, sticky="ew", pady=8
+        ttk.Separator(fields_frame, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6
         )
         row += 1
 
-        # 远程路径
-        add_label("远程路径:", row)
-        self.path_var = tk.StringVar(value=cfg.get("remote_path", ""))
-        ttk.Entry(main, textvariable=self.path_var, width=38).grid(
-            row=row, column=1, sticky="ew", pady=5, padx=(10, 0)
-        )
-        row += 1
-
-        # URL 前缀
-        add_label("URL 前缀:", row)
-        self.url_var = tk.StringVar(value=cfg.get("url_prefix", ""))
-        ttk.Entry(main, textvariable=self.url_var, width=38).grid(
-            row=row, column=1, sticky="ew", pady=5, padx=(10, 0)
-        )
-        row += 1
+        add_field("远程路径:", "path_var")
+        add_field("URL 前缀:", "url_var")
 
         # 粘贴板格式
-        add_label("粘贴板格式:", row)
-        self.fmt_var = tk.StringVar(value=cfg.get("clipboard_format", "path"))
-        fmt_frame = ttk.Frame(main)
-        fmt_frame.grid(row=row, column=1, sticky="w", pady=5, padx=(10, 0))
-        for val, label in [("path", "服务器路径"), ("url", "HTTP URL"), ("markdown", "Markdown")]:
+        ttk.Label(fields_frame, text="粘贴板格式:").grid(row=row, column=0, sticky="w", pady=3)
+        self.fmt_var = tk.StringVar()
+        fmt_frame = ttk.Frame(fields_frame)
+        fmt_frame.grid(row=row, column=1, sticky="w", pady=3, padx=(8, 0))
+        for val, label in [("path", "路径"), ("url", "URL"), ("markdown", "MD")]:
             ttk.Radiobutton(fmt_frame, text=label, variable=self.fmt_var, value=val).pack(
-                side="left", padx=(0, 12)
+                side="left", padx=(0, 10)
             )
         row += 1
 
-        # 文件命名
-        add_label("文件命名:", row)
-        self.name_var = tk.StringVar(value=cfg.get("file_naming", "datetime"))
-        name_frame = ttk.Frame(main)
-        name_frame.grid(row=row, column=1, sticky="w", pady=5, padx=(10, 0))
-        ttk.Radiobutton(name_frame, text="日期时间", variable=self.name_var, value="datetime").pack(
-            side="left", padx=(0, 12)
-        )
-        ttk.Radiobutton(name_frame, text="随机 UUID", variable=self.name_var, value="uuid").pack(
-            side="left"
-        )
-        row += 1
+        fields_frame.columnconfigure(1, weight=1)
 
-        # 快捷键
-        add_label("快捷键:", row)
-        self.hotkey_var = tk.StringVar(value=cfg.get("hotkey", "ctrl+alt+u"))
-        ttk.Entry(main, textvariable=self.hotkey_var, width=20).grid(
-            row=row, column=1, sticky="w", pady=5, padx=(10, 0)
-        )
-        row += 1
+        # ── 全局设置 ──
+        glob = cfg.get("global", {})
+        glob_frame = ttk.LabelFrame(main, text="通用设置", padding=8)
+        glob_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=4)
 
-        # 自动更新
-        self.auto_update_var = tk.BooleanVar(value=cfg.get("auto_update", True))
-        ttk.Checkbutton(main, text="自动检查更新（每天一次）", variable=self.auto_update_var).grid(
-            row=row, column=0, columnspan=2, sticky="w", pady=5
-        )
-        row += 1
+        ttk.Label(glob_frame, text="文件命名:").grid(row=0, column=0, sticky="w", pady=3)
+        self.name_var = tk.StringVar(value=glob.get("file_naming", "datetime"))
+        nf = ttk.Frame(glob_frame)
+        nf.grid(row=0, column=1, sticky="w", pady=3, padx=(8, 0))
+        ttk.Radiobutton(nf, text="日期时间", variable=self.name_var, value="datetime").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(nf, text="随机 UUID", variable=self.name_var, value="uuid").pack(side="left")
 
-        # 按钮
+        ttk.Label(glob_frame, text="快捷键:").grid(row=1, column=0, sticky="w", pady=3)
+        self.hotkey_var = tk.StringVar(value=glob.get("hotkey", "ctrl+alt+u"))
+        ttk.Entry(glob_frame, textvariable=self.hotkey_var, width=18).grid(
+            row=1, column=1, sticky="w", pady=3, padx=(8, 0)
+        )
+
+        self.auto_update_var = tk.BooleanVar(value=glob.get("auto_update", True))
+        ttk.Checkbutton(glob_frame, text="自动检查更新", variable=self.auto_update_var).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=3
+        )
+
+        # ── 按钮 ──
         btn_frame = ttk.Frame(main)
-        btn_frame.grid(row=row, column=0, columnspan=2, pady=12)
+        btn_frame.grid(row=4, column=0, columnspan=3, pady=10)
         ttk.Button(btn_frame, text="保存", command=self._save, width=12).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="取消", command=self.root.destroy, width=12).pack(side="left", padx=8)
 
+        main.columnconfigure(0, weight=1)
         main.columnconfigure(1, weight=1)
+        main.columnconfigure(2, weight=1)
+
+        # 加载当前 profile 数据
+        self._load_profile_to_ui(self.active)
+
+    def _load_profile_to_ui(self, name):
+        prof = self.profiles.get(name, dict(PROFILE_FIELDS))
+        self.server_var.set(prof.get("server", ""))
+        self.port_var.set(str(prof.get("port", 22)))
+        self.username_var.set(prof.get("username", ""))
+        self.password_var.set(prof.get("password", ""))
+        self.key_var.set(prof.get("ssh_key", ""))
+        self.path_var.set(prof.get("remote_path", ""))
+        self.url_var.set(prof.get("url_prefix", ""))
+        self.fmt_var.set(prof.get("clipboard_format", "path"))
+
+    def _save_current_profile_from_ui(self):
+        name = self.profile_var.get()
+        if name not in self.profiles:
+            return
+        self.profiles[name].update({
+            "server": self.server_var.get().strip(),
+            "port": int(self.port_var.get().strip() or 22),
+            "username": self.username_var.get().strip(),
+            "password": self.password_var.get(),
+            "ssh_key": self.key_var.get().strip(),
+            "remote_path": self.path_var.get().strip(),
+            "url_prefix": self.url_var.get().strip(),
+            "clipboard_format": self.fmt_var.get(),
+        })
+
+    def _on_profile_switch(self, event=None):
+        self._save_current_profile_from_ui()
+        new_name = self.profile_var.get()
+        self.active = new_name
+        self._load_profile_to_ui(new_name)
+
+    def _add_profile(self):
+        name = tk.simpledialog.askstring("新建配置", "配置名称:", parent=self.root)
+        if name and name.strip():
+            name = name.strip()
+            if name in self.profiles:
+                show_notification("Clip Upload", f"配置 '{name}' 已存在")
+                return
+            self._save_current_profile_from_ui()
+            self.profiles[name] = dict(PROFILE_FIELDS)
+            self.profile_combo["values"] = list(self.profiles.keys())
+            self.profile_var.set(name)
+            self.active = name
+            self._load_profile_to_ui(name)
+
+    def _rename_profile(self):
+        old_name = self.profile_var.get()
+        name = tk.simpledialog.askstring("重命名", "新名称:", initialvalue=old_name, parent=self.root)
+        if name and name.strip() and name.strip() != old_name:
+            name = name.strip()
+            self._save_current_profile_from_ui()
+            self.profiles[name] = self.profiles.pop(old_name)
+            if self.active == old_name:
+                self.active = name
+            self.profile_combo["values"] = list(self.profiles.keys())
+            self.profile_var.set(name)
+
+    def _delete_profile(self):
+        name = self.profile_var.get()
+        if len(self.profiles) <= 1:
+            show_notification("Clip Upload", "至少保留一个配置")
+            return
+        if tk.messagebox.askyesno("删除配置", f"确定删除 '{name}'?", parent=self.root):
+            del self.profiles[name]
+            first = list(self.profiles.keys())[0]
+            self.active = first
+            self.profile_combo["values"] = list(self.profiles.keys())
+            self.profile_var.set(first)
+            self._load_profile_to_ui(first)
 
     def _toggle_pwd(self):
         self.pwd_entry.config(show="" if self.show_pwd_var.get() else "*")
@@ -624,23 +719,18 @@ class SettingsDialog:
             self.key_var.set(path)
 
     def _save(self):
-        self.cfg["server"] = self.server_var.get().strip()
-        try:
-            self.cfg["port"] = int(self.port_var.get().strip() or 22)
-        except ValueError:
-            self.cfg["port"] = 22
-        self.cfg["username"] = self.username_var.get().strip()
-        self.cfg["password"] = self.password_var.get()
-        self.cfg["ssh_key"] = self.key_var.get().strip()
-        self.cfg["remote_path"] = self.path_var.get().strip()
-        self.cfg["url_prefix"] = self.url_var.get().strip()
-        self.cfg["clipboard_format"] = self.fmt_var.get()
-        self.cfg["file_naming"] = self.name_var.get()
-        self.cfg["hotkey"] = self.hotkey_var.get().strip()
-        self.cfg["auto_update"] = self.auto_update_var.get()
+        self._save_current_profile_from_ui()
+        self.cfg["active_profile"] = self.active
+        self.cfg["profiles"] = self.profiles
+        self.cfg["global"] = {
+            "file_naming": self.name_var.get(),
+            "image_format": "png",
+            "hotkey": self.hotkey_var.get().strip(),
+            "auto_update": self.auto_update_var.get(),
+            "last_check": self.cfg.get("global", {}).get("last_check", ""),
+        }
         save_config(self.cfg)
-        log.info("config saved: server=%s user=%s path=%s",
-                 self.cfg["server"], self.cfg["username"], self.cfg["remote_path"])
+        log.info("config saved: active=%s profiles=%s", self.active, list(self.profiles.keys()))
         if self.on_save:
             self.on_save(self.cfg)
         self.root.destroy()
@@ -649,16 +739,16 @@ class SettingsDialog:
         self.root.mainloop()
 
 
-# ── 托盘图标 ──────────────────────────────────────────
-def create_tray_icon(cfg, on_quit):
-    try:
-        import pystray
-        from PIL import Image, ImageDraw
-    except ImportError as e:
-        log.error("pystray import failed: %s", e)
-        return None
+# ── 托盘图标 (动态菜单) ──────────────────────────────
+class TrayApp:
+    def __init__(self, cfg, on_quit):
+        self.cfg = cfg
+        self.on_quit = on_quit
+        self.icon = None
+        self._menu_cache = None
 
-    def make_icon():
+    def _make_icon_image(self):
+        from PIL import Image, ImageDraw
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         draw.rounded_rectangle([14, 6, 50, 50], radius=6, fill="#4A90D9", outline="#2E6BA6", width=2)
@@ -666,51 +756,91 @@ def create_tray_icon(cfg, on_quit):
         draw.rectangle([24, 54, 40, 62], fill="#4A90D9", outline="#2E6BA6")
         return img
 
-    def on_upload(icon, item):
-        do_upload(cfg)
+    def _build_menu(self):
+        import pystray
+        active = self.cfg.get("active_profile", "default")
+        profiles = self.cfg.get("profiles", {})
+        merged = get_merged_config(self.cfg)
+        server_label = merged.get("server", "") or "未配置"
+        active_text = f"[{active}] {server_label}"
 
-    def on_settings(icon, item):
-        def open_settings():
-            d = SettingsDialog(cfg)
+        items = [
+            pystray.MenuItem(f"上传  (当前: {active_text})", lambda i, item: do_upload(self.cfg)),
+            pystray.Menu.SEPARATOR,
+        ]
+
+        # 服务器列表
+        if profiles:
+            profile_items = []
+            for name, prof in profiles.items():
+                svr = prof.get("server", "") or "未配置"
+                label = f"{name}  ({svr})"
+                profile_items.append(
+                    pystray.MenuItem(
+                        label,
+                        lambda i, item, n=name: self._switch_profile(n),
+                        checked=lambda i, item, n=name: n == active,
+                        radio=True,
+                    )
+                )
+            items.append(pystray.Menu("切换服务器", *profile_items))
+            items.append(pystray.Menu.SEPARATOR)
+
+        items.extend([
+            pystray.MenuItem("设置...", lambda i, item: self._open_settings()),
+            pystray.MenuItem("检查更新...", lambda i, item: self._check_update()),
+            pystray.MenuItem("打开配置文件", lambda i, item: os.startfile(str(CONFIG_PATH))),
+            pystray.MenuItem("打开日志", lambda i, item: os.startfile(str(LOG_PATH))),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("退出", lambda i, item: (self.icon.stop(), self.on_quit())),
+        ])
+
+        return pystray.Menu(*items)
+
+    def _switch_profile(self, name):
+        self.cfg["active_profile"] = name
+        save_config(self.cfg)
+        merged = get_merged_config(self.cfg)
+        log.info("switched to profile: %s (%s)", name, merged.get("server", ""))
+        show_notification("Clip Upload", f"已切换到: {name}")
+        self._refresh_icon()
+
+    def _refresh_icon(self):
+        if self.icon:
+            self.icon.menu = self._build_menu()
+            active = self.cfg.get("active_profile", "default")
+            merged = get_merged_config(self.cfg)
+            svr = merged.get("server", "") or "未配置"
+            self.icon.title = f"Clip Upload v{__version__} - [{active}] {svr}"
+
+    def _open_settings(self):
+        def open_dialog():
+            d = SettingsDialog(self.cfg, on_save=lambda c: (self.cfg.update(c), self._refresh_icon()))
             d.show()
-            cfg.update(load_config())
-        threading.Thread(target=open_settings, daemon=True).start()
+        threading.Thread(target=open_dialog, daemon=True).start()
 
-    def on_open(icon, item):
-        os.startfile(str(CONFIG_PATH))
-
-    def on_check_update(icon, item):
+    def _check_update(self):
         def check():
             info = check_for_update(silent=False)
             if info:
-                d = UpdateDialog(
-                    info,
-                    on_update=lambda: do_update(info, on_quit),
-                    on_skip=lambda: None,
-                )
+                d = UpdateDialog(info, on_update=lambda: do_update(info, self.on_quit), on_skip=lambda: None)
                 d.show()
             else:
                 show_notification("Clip Upload", f"已是最新版本 v{__version__}")
         threading.Thread(target=check, daemon=True).start()
 
-    def on_open_log(icon, item):
-        os.startfile(str(LOG_PATH))
+    def run(self):
+        try:
+            import pystray
+        except ImportError as e:
+            log.error("pystray import failed: %s", e)
+            return False
 
-    icon = pystray.Icon(
-        "clip-upload",
-        make_icon(),
-        f"Clip Upload v{__version__}",
-        menu=pystray.Menu(
-            pystray.MenuItem("上传剪贴板图片", on_upload),
-            pystray.MenuItem("设置...", on_settings),
-            pystray.MenuItem("检查更新...", on_check_update),
-            pystray.MenuItem("打开配置文件", on_open),
-            pystray.MenuItem("打开日志", on_open_log),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("退出", lambda icon, item: (icon.stop(), on_quit())),
-        ),
-    )
-    return icon
+        self.icon = pystray.Icon("clip-upload", self._make_icon_image(), "Clip Upload", self._build_menu())
+        self._refresh_icon()
+        log.info("starting tray icon")
+        self.icon.run()
+        return True
 
 
 # ── 主入口 ────────────────────────────────────────────
@@ -718,9 +848,7 @@ def main():
     log.info("=" * 50)
     log.info("ClipUpload v%s starting", __version__)
     log.info("exe: %s", sys.executable)
-    log.info("config: %s", CONFIG_PATH)
 
-    # 单实例检查
     instance = SingleInstance()
     if not instance.acquire():
         log.warning("another instance already running, exiting")
@@ -728,12 +856,14 @@ def main():
         return
 
     cfg = load_config()
-    hotkey = cfg.get("hotkey", "ctrl+alt+u")
     quit_event = lambda: (instance.release(), os._exit(0))
 
-    log.info("server=%s port=%s user=%s path=%s",
-             cfg.get("server"), cfg.get("port"), cfg.get("username"), cfg.get("remote_path"))
+    active = cfg.get("active_profile", "default")
+    merged = get_merged_config(cfg)
+    log.info("active profile: %s | server=%s user=%s path=%s",
+             active, merged.get("server"), merged.get("username"), merged.get("remote_path"))
 
+    hotkey = cfg.get("global", {}).get("hotkey", "ctrl+alt+u")
     try:
         import keyboard
         keyboard.add_hotkey(hotkey, lambda: do_upload(cfg), suppress=False)
@@ -743,11 +873,8 @@ def main():
 
     threading.Thread(target=lambda: auto_update_check(cfg, quit_event), daemon=True).start()
 
-    icon = create_tray_icon(cfg, on_quit=quit_event)
-    if icon:
-        log.info("starting tray icon")
-        icon.run()
-    else:
+    tray = TrayApp(cfg, on_quit=quit_event)
+    if not tray.run():
         log.warning("tray unavailable, running in background")
         try:
             threading.Event().wait()
