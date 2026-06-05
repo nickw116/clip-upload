@@ -880,7 +880,14 @@ def main():
     instance = SingleInstance()
     if not instance.acquire():
         log.warning("another instance already running, exiting")
-        show_notification("Clip Upload", "已在运行中，请查看系统托盘")
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0, "ClipUpload 已在运行中。\n\n如需重启：先在托盘右键退出旧版本，再重新打开。\n\n如果托盘找不到图标，请打开任务管理器结束 ClipUpload.exe 进程。",
+                "Clip Upload", 0x30
+            )
+        except Exception:
+            pass
         return
 
     cfg = load_config()
@@ -908,7 +915,20 @@ def main():
 
 
 if __name__ == "__main__":
+    # Top-level crash handler - works even before logging is ready
     try:
         main()
+    except SystemExit:
+        raise
     except Exception as e:
-        log.critical("fatal: %s\n%s", e, traceback.format_exc())
+        try:
+            log.critical("fatal: %s\n%s", e, traceback.format_exc())
+        except Exception:
+            pass
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0, f"ClipUpload crashed: {e}", "Clip Upload Error", 0x10
+            )
+        except Exception:
+            pass
