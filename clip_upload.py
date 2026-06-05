@@ -19,7 +19,7 @@ import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
-from tkinter import ttk
+from tkinter import ttk, simpledialog, messagebox
 import tkinter as tk
 
 __version__ = "1.4.0"
@@ -836,11 +836,39 @@ class TrayApp:
             log.error("pystray import failed: %s", e)
             return False
 
-        self.icon = pystray.Icon("clip-upload", self._make_icon_image(), "Clip Upload", self._build_menu())
-        self._refresh_icon()
-        log.info("starting tray icon")
-        self.icon.run()
-        return True
+        try:
+            self.icon = pystray.Icon("clip-upload", self._make_icon_image(), "Clip Upload", self._build_menu())
+            self._refresh_icon()
+            log.info("starting tray icon")
+            self.icon.run()
+            return True
+        except Exception as e:
+            log.error("tray icon failed: %s\n%s", e, traceback.format_exc())
+            return False
+
+
+def _show_fallback_window(cfg, quit_event):
+    """托盘不可用时的 fallback 窗口"""
+    root = tk.Tk()
+    root.title("Clip Upload")
+    root.geometry("320x160")
+    root.resizable(False, False)
+    root.configure(bg="#f5f5f5")
+
+    active = cfg.get("active_profile", "default")
+    merged = get_merged_config(cfg)
+    svr = merged.get("server", "") or "未配置"
+
+    ttk.Label(root, text=f"Clip Upload v{__version__}", font=("", 12, "bold")).pack(pady=(16, 4))
+    ttk.Label(root, text=f"当前服务器: [{active}] {svr}").pack()
+    ttk.Label(root, text="快捷键: Ctrl+Alt+U 上传截图").pack(pady=4)
+    ttk.Button(root, text="设置", command=lambda: threading.Thread(
+        target=lambda: SettingsDialog(cfg, on_save=lambda c: None).show(), daemon=True
+    ).start(), width=10).pack(pady=8)
+    ttk.Button(root, text="退出", command=lambda: (root.destroy(), quit_event()), width=10).pack()
+
+    root.protocol("WM_DELETE_WINDOW", lambda: (root.destroy(), quit_event()))
+    root.mainloop()
 
 
 # ── 主入口 ────────────────────────────────────────────
@@ -875,11 +903,8 @@ def main():
 
     tray = TrayApp(cfg, on_quit=quit_event)
     if not tray.run():
-        log.warning("tray unavailable, running in background")
-        try:
-            threading.Event().wait()
-        except KeyboardInterrupt:
-            pass
+        log.warning("tray unavailable, showing fallback window")
+        _show_fallback_window(cfg, quit_event)
 
 
 if __name__ == "__main__":
