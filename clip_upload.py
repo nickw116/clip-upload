@@ -22,7 +22,7 @@ from pathlib import Path
 from tkinter import ttk, simpledialog, messagebox
 import tkinter as tk
 
-__version__ = "1.4.0"
+__version__ = "1.6.0"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -739,63 +739,57 @@ class SettingsDialog:
         self.root.mainloop()
 
 
-# ── 托盘图标 (动态菜单) ──────────────────────────────
+# ── 托盘图标 (infi.systray) ──────────────────────────
 class TrayApp:
     def __init__(self, cfg, on_quit):
         self.cfg = cfg
         self.on_quit = on_quit
-        self.icon = None
-        self._menu_cache = None
+        self._systray = None
+        self._icon_path = None
 
-    def _make_icon_image(self):
+    def _create_icon_file(self):
+        """生成 .ico 文件供 infi.systray 使用"""
         from PIL import Image, ImageDraw
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         draw.rounded_rectangle([14, 6, 50, 50], radius=6, fill="#4A90D9", outline="#2E6BA6", width=2)
         draw.polygon([(32, 2), (16, 24), (48, 24)], fill="#4A90D9")
         draw.rectangle([24, 54, 40, 62], fill="#4A90D9", outline="#2E6BA6")
-        return img
+        ico_path = CONFIG_DIR / "tray_icon.ico"
+        img.save(str(ico_path), format="ICO", sizes=[(16, 16), (32, 32), (64, 64)])
+        self._icon_path = str(ico_path)
 
-    def _build_menu(self):
-        import pystray
+    def _build_menu_items(self):
+        """构建 infi.systray 菜单"""
+        from infi.systray import SysTrayIcon
         active = self.cfg.get("active_profile", "default")
         profiles = self.cfg.get("profiles", {})
         merged = get_merged_config(self.cfg)
-        server_label = merged.get("server", "") or "未配置"
-        active_text = f"[{active}] {server_label}"
+        svr = merged.get("server", "") or "未配置"
 
-        items = [
-            pystray.MenuItem(f"上传  (当前: {active_text})", lambda i, item: do_upload(self.cfg)),
-            pystray.Menu.SEPARATOR,
-        ]
+        menu_items = []
+        # 上传
+        menu_items.append(("上传截图", None, lambda s: do_upload(self.cfg)))
+        menu_items.append(("SEP", None, None))
 
         # 服务器列表
-        if profiles:
-            profile_items = []
+        if len(profiles) > 1:
+            sub_items = []
             for name, prof in profiles.items():
-                svr = prof.get("server", "") or "未配置"
-                label = f"{name}  ({svr})"
-                profile_items.append(
-                    pystray.MenuItem(
-                        label,
-                        lambda i, item, n=name: self._switch_profile(n),
-                        checked=lambda i, item, n=name: n == active,
-                        radio=True,
-                    )
-                )
-            items.append(pystray.Menu("切换服务器", *profile_items))
-            items.append(pystray.Menu.SEPARATOR)
+                prefix = ">> " if name == active else "    "
+                p_svr = prof.get("server", "") or "未配置"
+                label = f"{prefix} {name} ({p_svr})"
+                sub_items.append((label, None, lambda s, n=name: self._switch_profile(n)))
+            menu_items.append(("切换服务器", None, tuple(sub_items)))
+            menu_items.append(("SEP", None, None))
 
-        items.extend([
-            pystray.MenuItem("设置...", lambda i, item: self._open_settings()),
-            pystray.MenuItem("检查更新...", lambda i, item: self._check_update()),
-            pystray.MenuItem("打开配置文件", lambda i, item: os.startfile(str(CONFIG_PATH))),
-            pystray.MenuItem("打开日志", lambda i, item: os.startfile(str(LOG_PATH))),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("退出", lambda i, item: (self.icon.stop(), self.on_quit())),
-        ])
-
-        return pystray.Menu(*items)
+        menu_items.append(("设置...", None, lambda s: self._open_settings()))
+        menu_items.append(("检查更新...", None, lambda s: self._check_update()))
+        menu_items.append(("打开配置文件", None, lambda s: os.startfile(str(CONFIG_PATH))))
+        menu_items.append(("打开日志", None, lambda s: os.startfile(str(LOG_PATH))))
+        menu_items.append(("SEP", None, None))
+        menu_items.append(("退出", None, lambda s: self._quit()))
+        return tuple(menu_items)
 
     def _switch_profile(self, name):
         self.cfg["active_profile"] = name
@@ -803,19 +797,17 @@ class TrayApp:
         merged = get_merged_config(self.cfg)
         log.info("switched to profile: %s (%s)", name, merged.get("server", ""))
         show_notification("Clip Upload", f"已切换到: {name}")
-        self._refresh_icon()
+        self._restart_tray()
 
-    def _refresh_icon(self):
-        if self.icon:
-            self.icon.menu = self._build_menu()
-            active = self.cfg.get("active_profile", "default")
-            merged = get_merged_config(self.cfg)
-            svr = merged.get("server", "") or "未配置"
-            self.icon.title = f"Clip Upload v{__version__} - [{active}] {svr}"
+    def _restart_tray(self):
+        """重建托盘菜单（infi.systray 不支持动态更新菜单，需重启）"""
+        if self._systray:
+            self._systray.shutdown()
+        self.run()
 
     def _open_settings(self):
         def open_dialog():
-            d = SettingsDialog(self.cfg, on_save=lambda c: (self.cfg.update(c), self._refresh_icon()))
+            d = SettingsDialog(self.cfg, on_save=lambda c: self.cfg.update(c))
             d.show()
         threading.Thread(target=open_dialog, daemon=True).start()
 
@@ -829,18 +821,28 @@ class TrayApp:
                 show_notification("Clip Upload", f"已是最新版本 v{__version__}")
         threading.Thread(target=check, daemon=True).start()
 
+    def _quit(self):
+        if self._systray:
+            self._systray.shutdown()
+        self.on_quit()
+
     def run(self):
         try:
-            import pystray
+            from infi.systray import SysTrayIcon
         except ImportError as e:
-            log.error("pystray import failed: %s", e)
+            log.error("infi.systray import failed: %s", e)
             return False
 
         try:
-            self.icon = pystray.Icon("clip-upload", self._make_icon_image(), "Clip Upload", self._build_menu())
-            self._refresh_icon()
-            log.info("starting tray icon")
-            self.icon.run()
+            self._create_icon_file()
+            active = self.cfg.get("active_profile", "default")
+            merged = get_merged_config(self.cfg)
+            svr = merged.get("server", "") or "未配置"
+            hover = f"ClipUpload v{__version__} [{active}] {svr}"
+            menu = self._build_menu_items()
+            self._systray = SysTrayIcon(self._icon_path, hover, menu)
+            self._systray.start()
+            log.info("tray icon started: %s", hover)
             return True
         except Exception as e:
             log.error("tray icon failed: %s\n%s", e, traceback.format_exc())

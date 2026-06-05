@@ -27,21 +27,14 @@ jobs:
           pyinstaller --noconfirm --onefile --windowed ^
             --name=ClipUpload ^
             --hidden-import=keyboard ^
-            --hidden-import=pystray ^
-            --hidden-import=pystray._win32 ^
+            --hidden-import=infi.systray ^
             --hidden-import=win32clipboard ^
             --hidden-import=win32con ^
-            --hidden-import=win32api ^
-            --hidden-import=win32gui ^
-            --hidden-import=win32com ^
-            --hidden-import=win32com.client ^
-            --hidden-import=pythoncom ^
             --hidden-import=PIL.ImageGrab ^
             --hidden-import=PIL.ImageDraw ^
             --hidden-import=paramiko ^
             --hidden-import=nacl ^
-            --collect-all=pystray ^
-            --collect-all=pywin32 ^
+            --collect-all=infi.systray ^
             clip_upload.py
         shell: cmd
 
