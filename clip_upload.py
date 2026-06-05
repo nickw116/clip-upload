@@ -22,7 +22,7 @@ from pathlib import Path
 from tkinter import ttk, simpledialog, messagebox
 import tkinter as tk
 
-__version__ = "1.8.3"
+__version__ = "1.9.0"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -648,7 +648,7 @@ class SettingsDialog:
         self.fmt_var.set(prof.get("clipboard_format", "path"))
 
     def _save_current_profile_from_ui(self):
-        name = self.profile_var.get()
+        name = self.active
         if name not in self.profiles:
             return
         self.profiles[name].update({
@@ -971,11 +971,18 @@ class TrayApp:
         merged = get_merged_config(self.cfg)
         log.info("switched to profile: %s (%s)", name, merged.get("server", ""))
         show_notification("Clip Upload", f"已切换到: {name}")
-        self._restart_tray()
+        self._update_tooltip()
 
-    def _restart_tray(self):
-        self.shutdown()
-        self.run()
+    def _update_tooltip(self):
+        if not self._hwnd or not self._nid:
+            return
+        active = self.cfg.get("active_profile", "default")
+        merged = get_merged_config(self.cfg)
+        svr = merged.get("server", "") or "未配置"
+        tip = f"ClipUpload v{__version__} [{active}] {svr}"
+        self._nid.szTip = tip[:127]
+        self._nid.uFlags = _NIF_TIP
+        _shell32.Shell_NotifyIconW(_NIM_MODIFY, ctypes.byref(self._nid))
 
     def _open_settings(self):
         def open_dialog():
