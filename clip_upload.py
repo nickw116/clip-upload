@@ -22,7 +22,7 @@ from pathlib import Path
 from tkinter import ttk, simpledialog, messagebox
 import tkinter as tk
 
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -739,16 +739,62 @@ class SettingsDialog:
         self.root.mainloop()
 
 
-# ── 托盘图标 (infi.systray) ──────────────────────────
+# ── 托盘图标 (内联 ctypes，无第三方依赖) ───────────────
+import ctypes
+import ctypes.wintypes as _wt
+
+_WNDPROC = ctypes.CFUNCTYPE(ctypes.c_long, _wt.HWND, ctypes.c_uint, _wt.WPARAM, _wt.LPARAM)
+
+class _WNDCLASS(ctypes.Structure):
+    _fields_ = [("style", ctypes.c_uint), ("lpfnWndProc", _WNDPROC),
+                ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                ("hInstance", _wt.HINSTANCE), ("hIcon", _wt.HICON),
+                ("hCursor", _wt.HANDLE), ("hbrBackground", _wt.HBRUSH),
+                ("lpszMenuName", ctypes.c_wchar_p), ("lpszClassName", ctypes.c_wchar_p)]
+
+class _NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("hWnd", _wt.HWND), ("uID", ctypes.c_uint),
+                ("uFlags", ctypes.c_uint), ("uCallbackMessage", ctypes.c_uint),
+                ("hIcon", _wt.HICON), ("szTip", ctypes.c_wchar * 128),
+                ("dwState", ctypes.c_uint), ("dwStateMask", ctypes.c_uint),
+                ("szInfo", ctypes.c_wchar * 256), ("uTimeout", ctypes.c_uint),
+                ("szInfoTitle", ctypes.c_wchar * 64), ("dwInfoFlags", ctypes.c_uint),
+                ("guidItem", ctypes.c_char * 16), ("hBalloonIcon", _wt.HICON)]
+
+class _MENUITEMINFOW(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("fMask", ctypes.c_uint),
+                ("fType", ctypes.c_uint), ("fState", ctypes.c_uint),
+                ("wID", ctypes.c_uint), ("hSubMenu", _wt.HMENU),
+                ("hbmpChecked", _wt.HBITMAP), ("hbmpUnchecked", _wt.HBITMAP),
+                ("dwItemData", ctypes.c_void_p), ("dwTypeData", ctypes.c_wchar_p),
+                ("cch", ctypes.c_uint), ("hbmpItem", _wt.HBITMAP)]
+
+_NIM_ADD, _NIM_MODIFY, _NIM_DELETE = 0, 1, 2
+_NIF_MESSAGE, _NIF_ICON, _NIF_TIP = 1, 2, 4
+_MIIM_ID, _MIIM_SUBMENU, _MIIM_STRING = 2, 4, 64
+_WM_DESTROY, _WM_CLOSE, _WM_COMMAND, _WM_USER = 2, 16, 273, 1024
+_WM_LBUTTONDBLCLK, _WM_RBUTTONUP = 515, 517
+_WM_TRAY = _WM_USER + 20
+_LR_LOADFROMFILE, _LR_DEFAULTSIZE, _IMAGE_ICON = 16, 64, 1
+_IDI_APPLICATION = 32512
+
+
 class TrayApp:
     def __init__(self, cfg, on_quit):
         self.cfg = cfg
         self.on_quit = on_quit
-        self._systray = None
+        self._hwnd = None
+        self._hicon = None
+        self._hinst = None
+        self._wndclass = None
+        self._menu_actions = {}
+        self._thread = None
         self._icon_path = None
+        self._nid = None
+        self._menu = None
+        self._wndproc_ref = None
 
     def _create_icon_file(self):
-        """生成 .ico 文件供 infi.systray 使用"""
         from PIL import Image, ImageDraw
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
@@ -759,37 +805,133 @@ class TrayApp:
         img.save(str(ico_path), format="ICO", sizes=[(16, 16), (32, 32), (64, 64)])
         self._icon_path = str(ico_path)
 
-    def _build_menu_items(self):
-        """构建 infi.systray 菜单"""
-        from infi.systray import SysTrayIcon
+    def _load_icon(self):
+        if self._icon_path and os.path.isfile(self._icon_path):
+            hicon = ctypes.windll.user32.LoadImageW(
+                0, self._icon_path, _IMAGE_ICON, 0, 0, _LR_LOADFROMFILE | _LR_DEFAULTSIZE)
+            if hicon:
+                self._hicon = hicon
+                return
+        self._hicon = ctypes.windll.user32.LoadIconW(0, _IDI_APPLICATION)
+
+    def _build_menu(self):
+        self._menu_actions.clear()
+        hmenu = ctypes.windll.user32.CreatePopupMenu()
+        self._build_menu_items(hmenu, self._menu_defs())
+        return hmenu
+
+    def _menu_defs(self):
         active = self.cfg.get("active_profile", "default")
         profiles = self.cfg.get("profiles", {})
         merged = get_merged_config(self.cfg)
         svr = merged.get("server", "") or "未配置"
-
-        menu_items = []
-        # 上传
-        menu_items.append(("上传截图", None, lambda s: do_upload(self.cfg)))
-        menu_items.append(("SEP", None, None))
-
-        # 服务器列表
+        items = []
+        items.append(("上传截图", lambda: do_upload(self.cfg)))
+        items.append(None)  # separator
         if len(profiles) > 1:
-            sub_items = []
+            sub = []
             for name, prof in profiles.items():
                 prefix = ">> " if name == active else "    "
                 p_svr = prof.get("server", "") or "未配置"
-                label = f"{prefix} {name} ({p_svr})"
-                sub_items.append((label, None, lambda s, n=name: self._switch_profile(n)))
-            menu_items.append(("切换服务器", None, tuple(sub_items)))
-            menu_items.append(("SEP", None, None))
+                sub.append((f"{prefix} {name} ({p_svr})", lambda n=name: self._switch_profile(n)))
+            items.append(("切换服务器", sub))
+            items.append(None)
+        items.append(("设置...", self._open_settings))
+        items.append(("检查更新...", self._check_update))
+        items.append(("打开配置文件", lambda: os.startfile(str(CONFIG_PATH))))
+        items.append(("打开日志", lambda: os.startfile(str(LOG_PATH))))
+        items.append(None)
+        items.append(("退出", self._quit))
+        return items
 
-        menu_items.append(("设置...", None, lambda s: self._open_settings()))
-        menu_items.append(("检查更新...", None, lambda s: self._check_update()))
-        menu_items.append(("打开配置文件", None, lambda s: os.startfile(str(CONFIG_PATH))))
-        menu_items.append(("打开日志", None, lambda s: os.startfile(str(LOG_PATH))))
-        menu_items.append(("SEP", None, None))
-        menu_items.append(("退出", None, lambda s: self._quit()))
-        return tuple(menu_items)
+    def _build_menu_items(self, hmenu, items):
+        from ctypes import byref
+        MIIM_FMASK = _MIIM_STRING | _MIIM_ID
+        mid = 1000
+        for item in reversed(items):
+            if item is None:
+                ctypes.windll.user32.AppendMenuW(hmenu, 0x800, 0, None)
+            elif isinstance(item[1], list):
+                text, sub_items = item
+                sub = ctypes.windll.user32.CreatePopupMenu()
+                self._build_menu_items(sub, sub_items)
+                ctypes.windll.user32.AppendMenuW(hmenu, 0x10, sub, text)  # MF_POPUP
+            else:
+                text, callback = item
+                self._menu_actions[mid] = callback
+                mii = _MENUITEMINFOW()
+                mii.cbSize = ctypes.sizeof(_MENUITEMINFOW)
+                mii.fMask = MIIM_FMASK
+                mii.wID = mid
+                mii.dwTypeData = text
+                mii.cch = len(text)
+                ctypes.windll.user32.InsertMenuItemW(hmenu, 0, True, byref(mii))
+                mid += 1
+
+    def _wndproc(self, hwnd, msg, wparam, lparam):
+        if msg == _WM_COMMAND:
+            cmd_id = wparam & 0xFFFF
+            if cmd_id in self._menu_actions:
+                try:
+                    self._menu_actions[cmd_id]()
+                except Exception:
+                    log.error("menu action error", exc_info=True)
+        elif msg == _WM_TRAY:
+            if lparam == _WM_RBUTTONUP:
+                pos = _wt.POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(pos))
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                ctypes.windll.user32.TrackPopupMenu(
+                    self._menu, 0, pos.x, pos.y, 0, hwnd, None)
+                ctypes.windll.user32.PostMessageW(hwnd, 0, 0, 0)
+            elif lparam == _WM_LBUTTONDBLCLK:
+                do_upload(self.cfg)
+        elif msg == _WM_DESTROY:
+            nid = _NOTIFYICONDATAW()
+            nid.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
+            nid.hWnd = hwnd
+            ctypes.windll.shell32.Shell_NotifyIconW(_NIM_DELETE, ctypes.byref(nid))
+            ctypes.windll.user32.PostQuitMessage(0)
+            self._hwnd = None
+            return 0
+        return ctypes.windll.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _message_loop(self):
+        self._hinst = ctypes.windll.kernel32.GetModuleHandleW(None)
+        cls_name = f"ClipUploadTray_{uuid.uuid4().hex[:8]}"
+        self._wndproc_ref = _WNDPROC(self._wndproc)
+        wc = _WNDCLASS()
+        wc.hInstance = self._hinst
+        wc.lpszClassName = cls_name
+        wc.lpfnWndProc = self._wndproc_ref
+        ctypes.windll.user32.RegisterClassW(ctypes.byref(wc))
+
+        self._hwnd = ctypes.windll.user32.CreateWindowExW(
+            0, cls_name, cls_name, 0, 0, 0, 0, 0, 0, 0, self._hinst, None)
+
+        self._load_icon()
+        self._menu = self._build_menu()
+        active = self.cfg.get("active_profile", "default")
+        merged = get_merged_config(self.cfg)
+        svr = merged.get("server", "") or "未配置"
+        tip = f"ClipUpload v{__version__} [{active}] {svr}"
+
+        nid = _NOTIFYICONDATAW()
+        nid.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
+        nid.hWnd = self._hwnd
+        nid.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP
+        nid.uCallbackMessage = _WM_TRAY
+        nid.hIcon = self._hicon
+        nid.szTip = tip[:127]
+        ctypes.windll.shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(nid))
+        self._nid = nid
+
+        log.info("tray icon started: %s", tip)
+
+        msg = _wt.MSG()
+        while ctypes.windll.user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
+            ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
 
     def _switch_profile(self, name):
         self.cfg["active_profile"] = name
@@ -800,9 +942,7 @@ class TrayApp:
         self._restart_tray()
 
     def _restart_tray(self):
-        """重建托盘菜单（infi.systray 不支持动态更新菜单，需重启）"""
-        if self._systray:
-            self._systray.shutdown()
+        self.shutdown()
         self.run()
 
     def _open_settings(self):
@@ -822,28 +962,23 @@ class TrayApp:
         threading.Thread(target=check, daemon=True).start()
 
     def _quit(self):
-        if self._systray:
-            self._systray.shutdown()
+        if self._hwnd:
+            ctypes.windll.user32.DestroyWindow(self._hwnd)
         self.on_quit()
+
+    def shutdown(self):
+        if self._hwnd:
+            ctypes.windll.user32.DestroyWindow(self._hwnd)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
 
     def run(self):
         try:
-            from infi.systray import SysTrayIcon
-        except ImportError as e:
-            log.error("infi.systray import failed: %s", e)
-            return False
-
-        try:
             self._create_icon_file()
-            active = self.cfg.get("active_profile", "default")
-            merged = get_merged_config(self.cfg)
-            svr = merged.get("server", "") or "未配置"
-            hover = f"ClipUpload v{__version__} [{active}] {svr}"
-            menu = self._build_menu_items()
-            self._systray = SysTrayIcon(self._icon_path, hover, menu)
-            self._systray.start()
-            log.info("tray icon started: %s", hover)
-            return True
+            self._thread = threading.Thread(target=self._message_loop, daemon=True)
+            self._thread.start()
+            self._thread.join(timeout=0.5)
+            return self._hwnd is not None
         except Exception as e:
             log.error("tray icon failed: %s\n%s", e, traceback.format_exc())
             return False
