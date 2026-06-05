@@ -28,6 +28,7 @@ jobs:
             --name=ClipUpload ^
             --hidden-import=keyboard ^
             --hidden-import=infi.systray ^
+            --hidden-import=pkg_resources ^
             --hidden-import=win32clipboard ^
             --hidden-import=win32con ^
             --hidden-import=PIL.ImageGrab ^
@@ -38,8 +39,14 @@ jobs:
             clip_upload.py
         shell: cmd
 
+      - name: Rename exe with version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Rename-Item dist/ClipUpload.exe "ClipUpload-${tag}.exe"
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ClipUpload.exe
+          files: dist/ClipUpload-*.exe
           generate_release_notes: true

@@ -22,7 +22,7 @@ from pathlib import Path
 from tkinter import ttk, simpledialog, messagebox
 import tkinter as tk
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -371,7 +371,7 @@ def check_for_update(silent=True):
                 show_notification("Clip Upload", f"已是最新版本 v{__version__}")
             return None
         for a in data.get("assets", []):
-            if a["name"] == "ClipUpload.exe":
+            if a["name"].startswith("ClipUpload-") and a["name"].endswith(".exe"):
                 return {"version": tag, "url": a["browser_download_url"], "notes": data.get("body", "")}
         return None
     except Exception as e:
@@ -384,7 +384,7 @@ def do_update(info, on_quit):
     try:
         import urllib.request
         exe_path = Path(sys.executable)
-        new_exe = CONFIG_DIR / "ClipUpload_new.exe"
+        new_exe = CONFIG_DIR / "ClipUpload_update.exe"
         updater_bat = CONFIG_DIR / "updater.bat"
 
         show_notification("Clip Upload", f"正在下载 v{info['version']}...")
