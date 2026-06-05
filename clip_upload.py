@@ -22,7 +22,7 @@ from pathlib import Path
 from tkinter import ttk, simpledialog, messagebox
 import tkinter as tk
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -886,6 +886,9 @@ class TrayApp:
                 ctypes.windll.user32.PostMessageW(hwnd, 0, 0, 0)
             elif lparam == _WM_LBUTTONDBLCLK:
                 do_upload(self.cfg)
+        elif msg == _WM_CLOSE:
+            ctypes.windll.user32.DestroyWindow(hwnd)
+            return 0
         elif msg == _WM_DESTROY:
             nid = _NOTIFYICONDATAW()
             nid.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
@@ -968,9 +971,9 @@ class TrayApp:
 
     def shutdown(self):
         if self._hwnd:
-            ctypes.windll.user32.DestroyWindow(self._hwnd)
+            ctypes.windll.user32.PostMessageW(self._hwnd, _WM_CLOSE, 0, 0)
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=3)
 
     def run(self):
         try:
@@ -1028,7 +1031,15 @@ def main():
         return
 
     cfg = load_config()
-    quit_event = lambda: (instance.release(), os._exit(0))
+    _stop = threading.Event()
+
+    def quit_action():
+        instance.release()
+        _stop.set()
+
+    def hard_quit():
+        instance.release()
+        os._exit(0)
 
     active = cfg.get("active_profile", "default")
     merged = get_merged_config(cfg)
@@ -1043,12 +1054,16 @@ def main():
     except Exception as e:
         log.warning("hotkey register failed: %s", e)
 
-    threading.Thread(target=lambda: auto_update_check(cfg, quit_event), daemon=True).start()
+    threading.Thread(target=lambda: auto_update_check(cfg, hard_quit), daemon=True).start()
 
-    tray = TrayApp(cfg, on_quit=quit_event)
-    if not tray.run():
+    tray = TrayApp(cfg, on_quit=quit_action)
+    if tray.run():
+        log.info("tray mode, main thread waiting")
+        _stop.wait()
+        tray.shutdown()
+    else:
         log.warning("tray unavailable, showing fallback window")
-        _show_fallback_window(cfg, quit_event)
+        _show_fallback_window(cfg, hard_quit)
 
 
 if __name__ == "__main__":
