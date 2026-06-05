@@ -22,7 +22,7 @@ from pathlib import Path
 from tkinter import ttk, simpledialog, messagebox
 import tkinter as tk
 
-__version__ = "1.8.1"
+__version__ = "1.8.2"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -276,7 +276,7 @@ def upload_file(local_path, cfg, filename):
 def show_notification(title, message):
     try:
         import ctypes
-        ctypes.windll.user32.MessageBoxTimeoutW(
+        _user32.MessageBoxTimeoutW(
             0, message, title, 0x40, 0, 3000
         )
         return
@@ -743,6 +743,36 @@ class SettingsDialog:
 import ctypes
 import ctypes.wintypes as _wt
 
+# 64-bit Windows 句柄必须设置 restype，否则返回值被截断为 32 位
+_user32 = ctypes.windll.user32
+_kernel32 = ctypes.windll.kernel32
+_shell32 = ctypes.windll.shell32
+
+_user32.CreatePopupMenu.restype = _wt.HMENU
+_user32.CreateWindowExW.restype = _wt.HWND
+_user32.CreateWindowExW.argtypes = [_wt.DWORD, ctypes.c_wchar_p, ctypes.c_wchar_p,
+    _wt.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    _wt.HWND, _wt.HMENU, _wt.HINSTANCE, ctypes.c_void_p]
+_user32.LoadImageW.restype = _wt.HANDLE
+_user32.LoadImageW.argtypes = [_wt.HINSTANCE, ctypes.c_wchar_p, _wt.UINT,
+    ctypes.c_int, ctypes.c_int, _wt.UINT]
+_user32.LoadIconW.restype = _wt.HICON
+_user32.GetModuleHandleW.restype = _wt.HMODULE
+_user32.RegisterClassW.restype = _wt.ATOM
+_user32.GetMessageW.restype = _wt.BOOL
+_user32.InsertMenuItemW.restype = _wt.BOOL
+_user32.AppendMenuW.restype = _wt.BOOL
+_user32.TrackPopupMenu.restype = _wt.BOOL
+_user32.SetForegroundWindow.restype = _wt.BOOL
+_user32.PostMessageW.restype = _wt.BOOL
+_user32.SendMessageW.restype = ctypes.c_long  # LRESULT
+_user32.DestroyWindow.restype = _wt.BOOL
+_user32.DefWindowProcW.restype = ctypes.c_long
+_user32.DefWindowProcW.argtypes = [_wt.HWND, _wt.UINT, _wt.WPARAM, _wt.LPARAM]
+_shell32.Shell_NotifyIconW.restype = _wt.BOOL
+_kernel32.GetModuleHandleW.restype = _wt.HMODULE
+_kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+
 _WNDPROC = ctypes.CFUNCTYPE(ctypes.c_long, _wt.HWND, ctypes.c_uint, _wt.WPARAM, _wt.LPARAM)
 
 class _WNDCLASS(ctypes.Structure):
@@ -807,16 +837,16 @@ class TrayApp:
 
     def _load_icon(self):
         if self._icon_path and os.path.isfile(self._icon_path):
-            hicon = ctypes.windll.user32.LoadImageW(
+            hicon = _user32.LoadImageW(
                 0, self._icon_path, _IMAGE_ICON, 0, 0, _LR_LOADFROMFILE | _LR_DEFAULTSIZE)
             if hicon:
                 self._hicon = hicon
                 return
-        self._hicon = ctypes.windll.user32.LoadIconW(0, _IDI_APPLICATION)
+        self._hicon = _user32.LoadIconW(0, _IDI_APPLICATION)
 
     def _build_menu(self):
         self._menu_actions.clear()
-        hmenu = ctypes.windll.user32.CreatePopupMenu()
+        hmenu = _user32.CreatePopupMenu()
         self._build_menu_items(hmenu, self._menu_defs())
         return hmenu
 
@@ -850,12 +880,12 @@ class TrayApp:
         mid = 1000
         for item in reversed(items):
             if item is None:
-                ctypes.windll.user32.AppendMenuW(hmenu, 0x800, 0, None)
+                _user32.AppendMenuW(hmenu, 0x800, 0, None)
             elif isinstance(item[1], list):
                 text, sub_items = item
-                sub = ctypes.windll.user32.CreatePopupMenu()
+                sub = _user32.CreatePopupMenu()
                 self._build_menu_items(sub, sub_items)
-                ctypes.windll.user32.AppendMenuW(hmenu, 0x10, sub, text)  # MF_POPUP
+                _user32.AppendMenuW(hmenu, 0x10, sub, text)  # MF_POPUP
             else:
                 text, callback = item
                 self._menu_actions[mid] = callback
@@ -865,7 +895,7 @@ class TrayApp:
                 mii.wID = mid
                 mii.dwTypeData = text
                 mii.cch = len(text)
-                ctypes.windll.user32.InsertMenuItemW(hmenu, 0, True, byref(mii))
+                _user32.InsertMenuItemW(hmenu, 0, True, byref(mii))
                 mid += 1
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
@@ -879,37 +909,37 @@ class TrayApp:
         elif msg == _WM_TRAY:
             if lparam == _WM_RBUTTONUP:
                 pos = _wt.POINT()
-                ctypes.windll.user32.GetCursorPos(ctypes.byref(pos))
-                ctypes.windll.user32.SetForegroundWindow(hwnd)
-                ctypes.windll.user32.TrackPopupMenu(
+                _user32.GetCursorPos(ctypes.byref(pos))
+                _user32.SetForegroundWindow(hwnd)
+                _user32.TrackPopupMenu(
                     self._menu, 0, pos.x, pos.y, 0, hwnd, None)
-                ctypes.windll.user32.PostMessageW(hwnd, 0, 0, 0)
+                _user32.PostMessageW(hwnd, 0, 0, 0)
             elif lparam == _WM_LBUTTONDBLCLK:
                 do_upload(self.cfg)
         elif msg == _WM_CLOSE:
-            ctypes.windll.user32.DestroyWindow(hwnd)
+            _user32.DestroyWindow(hwnd)
             return 0
         elif msg == _WM_DESTROY:
             nid = _NOTIFYICONDATAW()
             nid.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
             nid.hWnd = hwnd
-            ctypes.windll.shell32.Shell_NotifyIconW(_NIM_DELETE, ctypes.byref(nid))
-            ctypes.windll.user32.PostQuitMessage(0)
+            _shell32.Shell_NotifyIconW(_NIM_DELETE, ctypes.byref(nid))
+            _user32.PostQuitMessage(0)
             self._hwnd = None
             return 0
-        return ctypes.windll.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        return _user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _message_loop(self):
-        self._hinst = ctypes.windll.kernel32.GetModuleHandleW(None)
+        self._hinst = _kernel32.GetModuleHandleW(None)
         cls_name = f"ClipUploadTray_{uuid.uuid4().hex[:8]}"
         self._wndproc_ref = _WNDPROC(self._wndproc)
         wc = _WNDCLASS()
         wc.hInstance = self._hinst
         wc.lpszClassName = cls_name
         wc.lpfnWndProc = self._wndproc_ref
-        ctypes.windll.user32.RegisterClassW(ctypes.byref(wc))
+        _user32.RegisterClassW(ctypes.byref(wc))
 
-        self._hwnd = ctypes.windll.user32.CreateWindowExW(
+        self._hwnd = _user32.CreateWindowExW(
             0, cls_name, cls_name, 0, 0, 0, 0, 0, 0, 0, self._hinst, None)
 
         self._load_icon()
@@ -926,15 +956,15 @@ class TrayApp:
         nid.uCallbackMessage = _WM_TRAY
         nid.hIcon = self._hicon
         nid.szTip = tip[:127]
-        ctypes.windll.shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(nid))
+        _shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(nid))
         self._nid = nid
 
         log.info("tray icon started: %s", tip)
 
         msg = _wt.MSG()
-        while ctypes.windll.user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
-            ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
+        while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            _user32.TranslateMessage(ctypes.byref(msg))
+            _user32.DispatchMessageW(ctypes.byref(msg))
 
     def _switch_profile(self, name):
         self.cfg["active_profile"] = name
@@ -966,12 +996,12 @@ class TrayApp:
 
     def _quit(self):
         if self._hwnd:
-            ctypes.windll.user32.DestroyWindow(self._hwnd)
+            _user32.DestroyWindow(self._hwnd)
         self.on_quit()
 
     def shutdown(self):
         if self._hwnd:
-            ctypes.windll.user32.PostMessageW(self._hwnd, _WM_CLOSE, 0, 0)
+            _user32.PostMessageW(self._hwnd, _WM_CLOSE, 0, 0)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3)
 
@@ -1022,7 +1052,7 @@ def main():
         log.warning("another instance already running, exiting")
         try:
             import ctypes
-            ctypes.windll.user32.MessageBoxW(
+            _user32.MessageBoxW(
                 0, "ClipUpload 已在运行中。\n\n如需重启：先在托盘右键退出旧版本，再重新打开。\n\n如果托盘找不到图标，请打开任务管理器结束 ClipUpload.exe 进程。",
                 "Clip Upload", 0x30
             )
@@ -1079,7 +1109,7 @@ if __name__ == "__main__":
             pass
         try:
             import ctypes
-            ctypes.windll.user32.MessageBoxW(
+            _user32.MessageBoxW(
                 0, f"ClipUpload crashed: {e}", "Clip Upload Error", 0x10
             )
         except Exception:
