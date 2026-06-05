@@ -22,7 +22,7 @@ from pathlib import Path
 from tkinter import ttk, simpledialog, messagebox
 import tkinter as tk
 
-__version__ = "1.8.2"
+__version__ = "1.8.3"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -757,7 +757,6 @@ _user32.LoadImageW.restype = _wt.HANDLE
 _user32.LoadImageW.argtypes = [_wt.HINSTANCE, ctypes.c_wchar_p, _wt.UINT,
     ctypes.c_int, ctypes.c_int, _wt.UINT]
 _user32.LoadIconW.restype = _wt.HICON
-_user32.GetModuleHandleW.restype = _wt.HMODULE
 _user32.RegisterClassW.restype = _wt.ATOM
 _user32.GetMessageW.restype = _wt.BOOL
 _user32.InsertMenuItemW.restype = _wt.BOOL
