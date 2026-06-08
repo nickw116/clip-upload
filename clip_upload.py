@@ -22,7 +22,7 @@ from pathlib import Path
 from tkinter import ttk, simpledialog, messagebox
 import tkinter as tk
 
-__version__ = "1.10.0"
+__version__ = "1.10.5"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -637,7 +637,7 @@ class UpdateDialog:
 def _win32_browse_folder(title, initial_dir=""):
     """SHBrowseForFolderW 原生文件夹选择对话框"""
     import ctypes
-    from ctypes import c_wchar_p, c_int, c_void_p, Structure, byref
+    from ctypes import c_wchar_p, c_int, c_void_p, Structure, byref, POINTER
 
     class BROWSEINFOW(Structure):
         _fields_ = [
@@ -654,6 +654,13 @@ def _win32_browse_folder(title, initial_dir=""):
     shell32 = ctypes.windll.shell32
     ole32 = ctypes.windll.ole32
 
+    # 64-bit: 返回值是指针，必须设 restype 否则截断
+    shell32.SHBrowseForFolderW.restype = c_void_p
+    shell32.SHBrowseForFolderW.argtypes = [POINTER(BROWSEINFOW)]
+    shell32.SHGetPathFromIDListW.argtypes = [c_void_p, c_wchar_p]
+    shell32.SHGetPathFromIDListW.restype = c_int
+    ole32.CoTaskMemFree.argtypes = [c_void_p]
+
     ole32.CoInitialize(None)
     try:
         bi = BROWSEINFOW()
@@ -664,8 +671,10 @@ def _win32_browse_folder(title, initial_dir=""):
         if not pidl:
             return None
         path = ctypes.create_unicode_buffer(260)
-        shell32.SHGetPathFromIDListW(pidl, path)
-        ctypes.windll.ole32.CoTaskMemFree(pidl)
+        if not shell32.SHGetPathFromIDListW(pidl, path):
+            ole32.CoTaskMemFree(pidl)
+            return None
+        ole32.CoTaskMemFree(pidl)
         result = path.value
         return result if result else None
     finally:
@@ -675,7 +684,7 @@ def _win32_browse_folder(title, initial_dir=""):
 def _win32_open_file_dialog(title, filter_str):
     """GetOpenFileNameW 原生文件选择对话框"""
     import ctypes
-    from ctypes import c_wchar_p, c_int, c_void_p, Structure, byref, sizeof
+    from ctypes import c_wchar_p, c_int, c_void_p, Structure, byref, sizeof, POINTER
 
     class OPENFILENAMEW(Structure):
         _fields_ = [
@@ -702,6 +711,9 @@ def _win32_open_file_dialog(title, filter_str):
         ]
 
     comdlg32 = ctypes.windll.comdlg32
+    comdlg32.GetOpenFileNameW.restype = c_int
+    comdlg32.GetOpenFileNameW.argtypes = [POINTER(OPENFILENAMEW)]
+
     buf = ctypes.create_unicode_buffer(260)
     ofn = OPENFILENAMEW()
     ofn.lStructSize = sizeof(OPENFILENAMEW)

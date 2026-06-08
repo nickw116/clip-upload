@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-APP_SCRIPT = SCRIPT_DIR.parent / "clip_upload.py"  # 项目根目录
+APP_SCRIPT = SCRIPT_DIR.parent / "clip_upload.py"
 TEST_DIR = Path(tempfile.mkdtemp(prefix="clip_upload_gui_test_"))
 
 PASS = 0
@@ -41,13 +41,12 @@ def check(name, fn):
 #  Part 1: 逻辑 + Win32 结构体测试 (跨平台)
 # ══════════════════════════════════════════════════════
 print("=" * 60)
-print("  Part 1: 逻辑 + Win32 结构体测试")
+print("  Part 1: logic + Win32 struct tests")
 print("=" * 60)
 print()
 
 
 def test_import():
-    # Mock Windows-only modules for Linux
     import unittest.mock as mock
     if sys.platform != "win32":
         sys.modules.setdefault("msvcrt", mock.MagicMock())
@@ -70,12 +69,12 @@ def test_import():
     assert hasattr(mod, 'FolderWatcherManager')
     assert hasattr(mod, '_win32_browse_folder')
     assert hasattr(mod, '_win32_open_file_dialog')
+    assert mod.__version__ == "1.10.5", f"version mismatch: {mod.__version__}"
 
-check("模块导入", test_import)
+check("import + version", test_import)
 
 
 def test_browseinfow_struct():
-    """验证 BROWSEINFOW 结构体可以创建并设置字段"""
     from ctypes import c_wchar_p, c_int, c_void_p, Structure, sizeof
 
     class BROWSEINFOW(Structure):
@@ -91,14 +90,11 @@ def test_browseinfow_struct():
         ]
 
     bi = BROWSEINFOW()
-    # 验证结构体大小合理 (64-bit: 8+8+520+8+4+8+8+4 = ~568, 含 padding)
-    size = sizeof(BROWSEINFOW)
-    assert size > 0, "struct size should be positive"
-    # 验证可以设置字段
     bi.lpszTitle = "Test"
     bi.ulFlags = 0x40
+    assert sizeof(BROWSEINFOW) > 0
 
-check("BROWSEINFOW 结构体", test_browseinfow_struct)
+check("BROWSEINFOW struct", test_browseinfow_struct)
 
 
 def test_openfilenamew_struct():
@@ -136,7 +132,7 @@ def test_openfilenamew_struct():
     buf.value = "C:\\test\\file.pem"
     assert buf.value == "C:\\test\\file.pem"
 
-check("OPENFILENAMEW 结构体 + cast", test_openfilenamew_struct)
+check("OPENFILENAMEW struct + cast", test_openfilenamew_struct)
 
 
 def test_menu_id_no_collision():
@@ -148,35 +144,24 @@ def test_menu_id_no_collision():
             if item is None:
                 pass
             elif isinstance(item[1], list):
-                text, sub_items = item
-                build(sub_items)
+                build(item[1])
             else:
-                text, cb = item
-                mid = next_id[0]
-                actions[mid] = cb
+                actions[next_id[0]] = item[1]
                 next_id[0] += 1
 
     build([
-        ("上传截图", "upload"),
+        ("upload", "upload_cb"),
         None,
-        ("切换服务器", [("p1", "sw1"), ("p2", "sw2"), ("p3", "sw3")]),
+        ("switch", [("p1", "sw1"), ("p2", "sw2"), ("p3", "sw3")]),
         None,
-        ("设置...", "settings"),
-        ("检查更新...", "update"),
-        ("打开配置", "open_cfg"),
-        ("打开日志", "open_log"),
-        None,
-        ("退出", "quit"),
+        ("settings", "settings_cb"),
+        ("quit", "quit_cb"),
     ])
 
-    cbs = list(actions.values())
-    assert len(set(cbs)) == len(cbs), f"ID collision! {actions}"
-    quit_ids = [i for i, c in actions.items() if c == "quit"]
-    assert len(quit_ids) == 1
-    for sid in [i for i, c in actions.items() if "sw" in str(c)]:
-        assert actions[sid] != "quit"
+    vals = list(actions.values())
+    assert len(set(vals)) == len(vals), f"ID collision: {actions}"
 
-check("菜单 ID 无碰撞", test_menu_id_no_collision)
+check("menu ID no collision", test_menu_id_no_collision)
 
 
 def test_folder_watch_e2e():
@@ -192,16 +177,8 @@ def test_folder_watch_e2e():
     watch_dir.mkdir()
     remote_dir = TEST_DIR / "remote"
 
-    profile_cfg = {
-        "server": "localhost", "port": 22, "username": "test",
-        "password": "test", "ssh_key": "",
-        "remote_path": str(remote_dir), "url_prefix": "",
-        "clipboard_format": "path", "watch_folder": str(watch_dir),
-    }
-    global_cfg = {"file_naming": "datetime", "image_format": "png"}
-
     uploaded = []
-    orig_upload = mod.upload_file
+    orig = mod.upload_file
 
     def mock_upload(local_path, cfg, filename):
         remote_dir.mkdir(parents=True, exist_ok=True)
@@ -211,9 +188,14 @@ def test_folder_watch_e2e():
     mod.upload_file = mock_upload
     try:
         mgr = mod.FolderWatcherManager({
-            "active_profile": "test",
-            "profiles": {"test": profile_cfg},
-            "global": global_cfg,
+            "active_profile": "t",
+            "profiles": {"t": {
+                "server": "localhost", "port": 22, "username": "t",
+                "password": "t", "ssh_key": "",
+                "remote_path": str(remote_dir), "url_prefix": "",
+                "clipboard_format": "path", "watch_folder": str(watch_dir),
+            }},
+            "global": {"file_naming": "datetime", "image_format": "png"},
         })
         mgr.start()
         time.sleep(1)
@@ -229,115 +211,219 @@ def test_folder_watch_e2e():
         assert (watch_dir / "uploaded").exists()
         assert not (watch_dir / "screenshot.png").exists()
     finally:
-        mod.upload_file = orig_upload
+        mod.upload_file = orig
 
-check("文件夹监控 + 自动上传", test_folder_watch_e2e)
+check("folder watch + auto upload", test_folder_watch_e2e)
 
 
 # ══════════════════════════════════════════════════════
-#  Part 2: Windows GUI 测试
+#  Part 2: Windows GUI tests (real Win32 API calls)
 # ══════════════════════════════════════════════════════
 IS_WINDOWS = sys.platform == "win32"
 
 if IS_WINDOWS:
     print()
     print("=" * 60)
-    print("  Part 2: Windows GUI 测试")
+    print("  Part 2: Windows GUI tests")
     print("=" * 60)
     print()
 
-    def test_browse_folder_dialog():
-        """验证 _win32_browse_folder 弹出对话框不崩溃"""
-        mod = sys.modules["clip_upload"]
+    mod = sys.modules["clip_upload"]
+    import pywinauto
+
+    # ── helper: run function in thread, auto-close dialog via pywinauto ──
+    def _test_dialog_with_automation(fn, dialog_title, action_fn, timeout=15):
+        """Run fn in thread, find dialog by title, perform action, return fn result."""
         result = [None]
 
-        def browse():
+        def worker():
             try:
-                result[0] = mod._win32_browse_folder("选择监控文件夹")
+                result[0] = fn()
             except Exception as e:
                 result[0] = f"ERROR: {e}"
 
-        t = threading.Thread(target=browse, daemon=True)
+        t = threading.Thread(target=worker, daemon=True)
         t.start()
-        time.sleep(3)
+        time.sleep(2)
 
-        # 找到对话框并关闭
         try:
-            import pywinauto
             app = pywinauto.Application(backend="win32").connect(
-                title_re="选择监控文件夹", timeout=5)
+                title_re=dialog_title, timeout=8)
             dlg = app.top_window()
-            dlg.close()
-        except Exception:
-            pass
+            time.sleep(0.5)
+            action_fn(dlg)
+        except Exception as e:
+            print(f"    (dialog automation failed: {e})")
 
-        t.join(timeout=5)
-        assert not (isinstance(result[0], str) and result[0].startswith("ERROR")), result[0]
+        t.join(timeout=timeout)
+        return result[0]
 
-    check("浏览文件夹对话框弹出", test_browse_folder_dialog)
 
-    def test_browse_file_dialog():
-        """验证 _win32_open_file_dialog 弹出对话框不崩溃"""
-        mod = sys.modules["clip_upload"]
-        result = [None]
+    def test_browse_folder_returns_path():
+        """Select a real folder and verify the path is returned"""
+        target_dir = os.environ.get("TEMP", "C:\\Windows\\Temp")
+        selected_path = [None]
+
+        def select_folder(dlg):
+            """Navigate to target folder in the browse dialog tree and click OK"""
+            try:
+                # The folder browse dialog has a tree view
+                # Try to find the edit/toolbar and type a path
+                # New-style dialog (BIF_NEWDIALOGSTYLE) has a text field
+                # Try clicking OK directly (desktop folder is selected by default)
+                ok_btn = dlg.child_window(title="OK", control_type="Button")
+                ok_btn.click()
+            except Exception:
+                try:
+                    dlg.OK.click()
+                except Exception:
+                    dlg.close()
 
         def browse():
+            return mod._win32_browse_folder("SelectFolderTest")
+
+        r = _test_dialog_with_automation(browse, "SelectFolderTest", select_folder)
+
+        # Should return a non-None, non-empty string (desktop or some folder)
+        assert r is not None, "browse returned None - user selected folder but got no path"
+        assert isinstance(r, str), f"expected str, got {type(r)}: {r}"
+        assert len(r) > 0, "browse returned empty string"
+        assert "\\" in r or "/" in r, f"not a valid path: {r}"
+
+    check("browse folder dialog returns real path", test_browse_folder_returns_path)
+
+
+    def test_browse_file_dialog_returns_path():
+        """Open file dialog, select a real file, verify path is returned"""
+        test_file = os.path.join(os.environ.get("TEMP", "C:\\Windows\\Temp"), "clip_test_file.txt")
+        with open(test_file, "w") as f:
+            f.write("test")
+
+        def select_file(dlg):
             try:
-                result[0] = mod._win32_open_file_dialog(
-                    "选择文件", "所有文件\0*.*\0")
-            except Exception as e:
-                result[0] = f"ERROR: {e}"
+                # Type the file path in the filename field
+                combo = dlg.child_window(class_name="Edit")
+                combo.set_text(test_file)
+                time.sleep(0.3)
+                ok_btn = dlg.child_window(title="&Open", control_type="Button")
+                ok_btn.click()
+            except Exception:
+                try:
+                    dlg.child_window(title="Open").click()
+                except Exception:
+                    dlg.close()
 
-        t = threading.Thread(target=browse, daemon=True)
-        t.start()
-        time.sleep(3)
+        def browse():
+            return mod._win32_open_file_dialog("SelectFileTest", "All\0*.*\0")
 
+        r = _test_dialog_with_automation(browse, "SelectFileTest", select_file)
+
+        assert r is not None, "file dialog returned None"
+        assert isinstance(r, str), f"expected str, got {type(r)}: {r}"
+        assert "clip_test_file.txt" in r, f"expected file path, got: {r}"
+
+        # cleanup
         try:
-            import pywinauto
-            app = pywinauto.Application(backend="win32").connect(
-                title_re="选择文件", timeout=5)
-            dlg = app.top_window()
-            dlg.close()
+            os.unlink(test_file)
         except Exception:
             pass
 
-        t.join(timeout=5)
-        assert not (isinstance(result[0], str) and result[0].startswith("ERROR")), result[0]
+    check("browse file dialog returns real path", test_browse_file_dialog_returns_path)
 
-    check("浏览文件对话框弹出", test_browse_file_dialog)
 
-    def test_settings_dialog():
-        """验证设置对话框可以打开并显示所有字段"""
-        mod = sys.modules["clip_upload"]
+    def test_settings_dialog_save():
+        """Open settings, set watch_folder, save, verify config persisted"""
+        cfg_dir = TEST_DIR / "cfg"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        cfg_path = cfg_dir / "config.json"
 
         test_cfg = {
             "active_profile": "default",
             "profiles": {"default": dict(mod.PROFILE_FIELDS,
-                          server="test.com", username="u", password="p")},
+                          server="test.com", username="u", password="p",
+                          remote_path="/tmp")},
             "global": dict(mod.GLOBAL_FIELDS),
         }
+        with open(cfg_path, "w") as f:
+            json.dump(test_cfg, f)
+
+        # Patch CONFIG_PATH temporarily
+        orig_config_path = mod.CONFIG_PATH
+        mod.CONFIG_PATH = cfg_path
+
+        saved_cfg = [None]
+
+        def on_save(c):
+            saved_cfg[0] = c
 
         opened = [False]
         def open_dlg():
             try:
-                d = mod.SettingsDialog(test_cfg, on_save=lambda c: None)
+                d = mod.SettingsDialog(test_cfg, on_save=on_save)
                 opened[0] = True
-                time.sleep(1)
-                d.root.destroy()
+                time.sleep(0.5)
+                # Set watch folder via the variable
+                d.watch_folder_var.set("C:\\Temp\\WatchTest")
+                # Trigger save
+                d._save()
             except Exception as e:
                 opened[0] = f"ERROR: {e}"
 
         t = threading.Thread(target=open_dlg, daemon=True)
         t.start()
         t.join(timeout=15)
-        assert opened[0] is True, f"dialog failed: {opened[0]}"
 
-    check("设置对话框打开", test_settings_dialog)
+        mod.CONFIG_PATH = orig_config_path
+
+        assert opened[0] is True, f"dialog failed: {opened[0]}"
+        assert saved_cfg[0] is not None, "on_save was not called"
+        assert saved_cfg[0]["profiles"]["default"]["watch_folder"] == "C:\\Temp\\WatchTest", \
+            f"watch_folder not saved: {saved_cfg[0]['profiles']['default']}"
+
+    check("settings dialog: set watch_folder + save", test_settings_dialog_save)
+
+
+    def test_settings_dialog_all_fields_present():
+        """Verify settings dialog has all required UI fields"""
+        import tkinter as tk
+
+        fields_found = {}
+
+        def check_fields():
+            test_cfg = {
+                "active_profile": "default",
+                "profiles": {"default": dict(mod.PROFILE_FIELDS)},
+                "global": dict(mod.GLOBAL_FIELDS),
+            }
+            d = mod.SettingsDialog(test_cfg, on_save=lambda c: None)
+
+            # Check all StringVar fields exist
+            fields_found["server"] = hasattr(d, 'server_var')
+            fields_found["port"] = hasattr(d, 'port_var')
+            fields_found["username"] = hasattr(d, 'username_var')
+            fields_found["password"] = hasattr(d, 'password_var')
+            fields_found["ssh_key"] = hasattr(d, 'key_var')
+            fields_found["remote_path"] = hasattr(d, 'path_var')
+            fields_found["url_prefix"] = hasattr(d, 'url_var')
+            fields_found["clipboard_format"] = hasattr(d, 'fmt_var')
+            fields_found["watch_folder"] = hasattr(d, 'watch_folder_var')
+            fields_found["file_naming"] = hasattr(d, 'name_var')
+            fields_found["hotkey"] = hasattr(d, 'hotkey_var')
+
+            d.root.destroy()
+
+        t = threading.Thread(target=check_fields, daemon=True)
+        t.start()
+        t.join(timeout=15)
+
+        for field, found in fields_found.items():
+            assert found, f"missing UI field: {field}"
+
+    check("settings dialog has all fields", test_settings_dialog_all_fields_present)
+
 
     def test_welcome_dialog():
-        """验证欢迎对话框可以正常显示"""
-        mod = sys.modules["clip_upload"]
-
+        """Verify welcome dialog opens and can be closed"""
         cfg = {
             "active_profile": "default",
             "profiles": {"default": dict(mod.PROFILE_FIELDS)},
@@ -355,17 +441,21 @@ if IS_WINDOWS:
 
         t = threading.Thread(target=show, daemon=True)
         t.start()
-        time.sleep(3)
+        time.sleep(2)
 
-        # 找到欢迎窗口并关闭
         try:
-            import pywinauto
             app = pywinauto.Application(backend="win32").connect(
-                title_re="Clip Upload v", timeout=5)
+                title_re="Clip Upload v1.10", timeout=5)
             dlg = app.top_window()
-            # 点击隐藏到后台按钮
+            # Click the hide button
             try:
-                dlg["隐藏到后台"].click()
+                btn = dlg.child_window(title_re=".*")
+                for child in dlg.descendants():
+                    if hasattr(child, 'window_text') and 'background' in str(child.window_text()).lower():
+                        child.click()
+                        break
+                else:
+                    dlg.close()
             except Exception:
                 dlg.close()
         except Exception:
@@ -374,19 +464,19 @@ if IS_WINDOWS:
         t.join(timeout=5)
         assert opened[0] is True, f"welcome failed: {opened[0]}"
 
-    check("欢迎对话框", test_welcome_dialog)
+    check("welcome dialog", test_welcome_dialog)
 
 
 # ══════════════════════════════════════════════════════
-#  清理 + 结果
+#  cleanup + results
 # ══════════════════════════════════════════════════════
 shutil.rmtree(TEST_DIR, ignore_errors=True)
 
 print()
 total = PASS + FAIL
-print(f"结果: {PASS} passed, {FAIL} failed, {total} total")
+print(f"result: {PASS} passed, {FAIL} failed, {total} total")
 if ERRORS:
-    print("失败项:")
+    print("failed:")
     for e in ERRORS:
         print(f"  - {e}")
 
