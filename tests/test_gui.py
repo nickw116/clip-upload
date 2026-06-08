@@ -70,7 +70,7 @@ def test_import():
     assert hasattr(mod, 'FolderWatcherManager')
     assert hasattr(mod, '_win32_browse_folder')
     assert hasattr(mod, '_win32_open_file_dialog')
-    assert mod.__version__ == "1.11.0", f"version mismatch: {mod.__version__}"
+    assert mod.__version__ == "1.11.1", f"version mismatch: {mod.__version__}"
 
 check("import + version", test_import)
 
