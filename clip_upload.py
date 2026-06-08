@@ -5,6 +5,7 @@
 托盘图标，右键退出 / 切换服务器 / 打开设置 / 检查更新。
 """
 
+import ctypes
 import io
 import json
 import logging
