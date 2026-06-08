@@ -33,6 +33,9 @@ jobs:
             --hidden-import=PIL.ImageDraw ^
             --hidden-import=paramiko ^
             --hidden-import=nacl ^
+            --hidden-import=watchdog ^
+            --hidden-import=watchdog.observers ^
+            --hidden-import=watchdog.events ^
             clip_upload.py
         shell: cmd
 

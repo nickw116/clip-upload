@@ -14,7 +14,7 @@ if errorlevel 1 (
 )
 
 echo [1/3] 安装依赖...
-pip install pyinstaller Pillow keyboard pystray win10toast pywin32
+pip install pyinstaller Pillow keyboard pystray win10toast pywin32 paramiko watchdog
 
 echo [2/3] 打包 exe...
 pyinstaller --noconfirm --onefile --windowed ^
@@ -23,6 +23,9 @@ pyinstaller --noconfirm --onefile --windowed ^
     --hidden-import=win10toast ^
     --hidden-import=win32clipboard ^
     --hidden-import=win32con ^
+    --hidden-import=watchdog ^
+    --hidden-import=watchdog.observers ^
+    --hidden-import=watchdog.events ^
     --name=ClipUpload ^
     clip_upload.py
 
