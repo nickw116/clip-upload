@@ -633,6 +633,92 @@ class UpdateDialog:
         self.root.mainloop()
 
 
+# ── Win32 原生对话框 (不依赖 tkinter, 可在任意线程调用) ──
+def _win32_browse_folder(title, initial_dir=""):
+    """SHBrowseForFolderW 原生文件夹选择对话框"""
+    import ctypes
+    from ctypes import c_wchar_p, c_int, c_void_p, POINTER, Structure, byref
+
+    class BROWSEINFOW(Structure):
+        _fields_ = [
+            ("hwndOwner", c_void_p),
+            ("pidlRoot", c_void_p),
+            ("pszDisplayName", ctypes.c_wchar * 260),
+            ("lpszTitle", c_wchar_p),
+            ("ulFlags", c_int),
+            ("lpfn", c_void_p),
+            ("lParam", c_void_p),
+            ("iImage", c_int),
+        ]
+
+    shell32 = ctypes.windll.shell32
+    ole32 = ctypes.windll.ole32
+
+    ole32.CoInitialize(None)
+    try:
+        bi = BROWSEINFOW()
+        bi.hwndOwner = 0
+        bi.pszDisplayName = (ctypes.c_wchar * 260)()
+        bi.lpszTitle = title
+        bi.ulFlags = 0x00000040  # BIF_NEWDIALOGSTYLE
+        pidl = shell32.SHBrowseForFolderW(byref(bi))
+        if not pidl:
+            return None
+        path = ctypes.create_unicode_buffer(260)
+        shell32.SHGetPathFromIDListW(pidl, path)
+        ctypes.windll.ole32.CoTaskMemFree(pidl)
+        result = path.value
+        return result if result else None
+    finally:
+        ole32.CoUninitialize()
+
+
+def _win32_open_file_dialog(title, filter_str):
+    """GetOpenFileNameW 原生文件选择对话框"""
+    import ctypes
+    from ctypes import c_wchar_p, c_int, c_void_p, Structure, byref, sizeof
+
+    class OPENFILENAMEW(Structure):
+        _fields_ = [
+            ("lStructSize", c_int),
+            ("hwndOwner", c_void_p),
+            ("hInstance", c_void_p),
+            ("lpstrFilter", c_wchar_p),
+            ("lpstrCustomFilter", c_wchar_p),
+            ("nMaxCustFilter", c_int),
+            ("nFilterIndex", c_int),
+            ("lpstrFile", c_wchar_p),
+            ("nMaxFile", c_int),
+            ("lpstrFileTitle", c_wchar_p),
+            ("nMaxFileTitle", c_int),
+            ("lpstrInitialDir", c_wchar_p),
+            ("lpstrTitle", c_wchar_p),
+            ("Flags", c_int),
+            ("nFileOffset", ctypes.c_ushort),
+            ("nFileExtension", ctypes.c_ushort),
+            ("lpstrDefExt", c_wchar_p),
+            ("lCustData", c_void_p),
+            ("lpfnHook", c_void_p),
+            ("lpTemplateName", c_wchar_p),
+        ]
+
+    comdlg32 = ctypes.windll.comdlg32
+    buf = ctypes.create_unicode_buffer(260)
+    ofn = OPENFILENAMEW()
+    ofn.lStructSize = sizeof(OPENFILENAMEW)
+    ofn.hwndOwner = 0
+    ofn.lpstrFilter = filter_str
+    ofn.nFilterIndex = 1
+    ofn.lpstrFile = buf
+    ofn.nMaxFile = 260
+    ofn.lpstrTitle = title
+    ofn.Flags = 0x00001000  # OFN_FILEMUSTEXIST
+
+    if comdlg32.GetOpenFileNameW(byref(ofn)):
+        return buf.value
+    return None
+
+
 # ── 设置窗口 (多 Profile) ────────────────────────────
 class SettingsDialog:
     def __init__(self, cfg, on_save=None):
@@ -881,20 +967,13 @@ class SettingsDialog:
         self.pwd_entry.config(show="" if self.show_pwd_var.get() else "*")
 
     def _browse_key(self):
-        self.root.attributes('-topmost', True)
-        path = tk.filedialog.askopenfilename(
-            title="选择 SSH 私钥文件",
-            filetypes=[("所有文件", "*.*"), ("PEM", "*.pem"), ("PPK", "*.ppk")],
-            parent=self.root,
-        )
-        self.root.attributes('-topmost', False)
+        path = _win32_open_file_dialog("选择 SSH 私钥文件",
+                                       "所有文件\0*.*\0PEM\0*.pem\0PPK\0*.ppk\0")
         if path:
             self.key_var.set(path)
 
     def _browse_watch_folder(self):
-        self.root.attributes('-topmost', True)
-        path = tk.filedialog.askdirectory(title="选择监控文件夹", parent=self.root)
-        self.root.attributes('-topmost', False)
+        path = _win32_browse_folder("选择监控文件夹")
         if path:
             self.watch_folder_var.set(path)
 
