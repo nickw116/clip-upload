@@ -82,6 +82,7 @@ PROFILE_FIELDS = {
     "remote_path": "/var/www/images",
     "url_prefix": "",
     "clipboard_format": "path",
+    "watch_folder": "",
 }
 
 # 全局设置字段
@@ -352,6 +353,156 @@ def do_upload(cfg):
         log.error("do_upload error: %s\n%s", e, traceback.format_exc())
 
 
+# ── 文件夹监控上传 ────────────────────────────────────
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    HAS_WATCHDOG = True
+except ImportError:
+    HAS_WATCHDOG = False
+
+
+def _wait_for_file_stable(filepath, timeout=30, poll_interval=0.5):
+    """Wait until file size stops changing (write complete)."""
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    last_size = -1
+    while _time.monotonic() < deadline:
+        try:
+            current_size = os.path.getsize(filepath)
+        except OSError:
+            return False
+        if current_size == last_size and current_size > 0:
+            return True
+        last_size = current_size
+        _time.sleep(poll_interval)
+    return False
+
+
+def _upload_from_folder(local_path, profile_cfg, global_cfg, profile_name):
+    """Upload a watch-folder file using the given profile's settings."""
+    import time as _time
+    merged = {**profile_cfg, **global_cfg, "_profile_name": profile_name}
+
+    server = merged.get("server", "").strip()
+    username = merged.get("username", "").strip()
+    password = merged.get("password", "")
+    ssh_key = merged.get("ssh_key", "").strip()
+    if not server or not username or (not password and not ssh_key):
+        log.warning("[watch:%s] profile incomplete, skipping file: %s",
+                    profile_name, local_path)
+        return
+
+    if not _wait_for_file_stable(local_path):
+        log.warning("[watch:%s] file not stable after timeout: %s",
+                    profile_name, local_path)
+        return
+
+    original_ext = Path(local_path).suffix or ".bin"
+    filename = generate_filename(merged)
+    filename = Path(filename).stem + original_ext
+
+    try:
+        upload_file(local_path, merged, filename)
+        log.info("[watch:%s] uploaded: %s -> %s", profile_name, local_path, filename)
+    except Exception as e:
+        log.error("[watch:%s] upload failed for %s: %s\n%s",
+                  profile_name, local_path, e, traceback.format_exc())
+        return
+
+    watch_dir = profile_cfg.get("watch_folder", "")
+    uploaded_dir = Path(watch_dir) / "uploaded"
+    try:
+        uploaded_dir.mkdir(parents=True, exist_ok=True)
+        dest = uploaded_dir / Path(local_path).name
+        if dest.exists():
+            stem = dest.stem
+            dest = uploaded_dir / f"{stem}_{int(_time.time())}{dest.suffix}"
+        shutil.move(local_path, str(dest))
+        log.info("[watch:%s] moved to %s", profile_name, dest)
+    except Exception as e:
+        log.error("[watch:%s] failed to move uploaded file: %s", profile_name, e)
+
+
+if HAS_WATCHDOG:
+    class _ProfileFolderHandler(FileSystemEventHandler):
+        def __init__(self, profile_name, profile_cfg, global_cfg):
+            super().__init__()
+            self.profile_name = profile_name
+            self.profile_cfg = profile_cfg
+            self.global_cfg = global_cfg
+            self._seen_files = set()
+
+        def on_created(self, event):
+            if event.is_directory:
+                return
+            filepath = event.src_path
+            if "\\uploaded\\" in filepath or "/uploaded/" in filepath:
+                return
+            basename = os.path.basename(filepath)
+            if basename.startswith("~$") or basename.endswith(".tmp"):
+                return
+            if filepath in self._seen_files:
+                return
+            self._seen_files.add(filepath)
+
+            def process():
+                try:
+                    _upload_from_folder(filepath, self.profile_cfg,
+                                        self.global_cfg, self.profile_name)
+                finally:
+                    self._seen_files.discard(filepath)
+
+            threading.Thread(target=process, daemon=True).start()
+
+
+class FolderWatcherManager:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self._observers = []
+
+    def start(self):
+        if not HAS_WATCHDOG:
+            log.warning("watchdog not installed; folder monitoring disabled")
+            return
+        global_cfg = self.cfg.get("global", {})
+        profiles = self.cfg.get("profiles", {})
+        for name, prof in profiles.items():
+            watch_dir = prof.get("watch_folder", "").strip()
+            if not watch_dir:
+                continue
+            watch_path = Path(watch_dir)
+            if not watch_path.is_dir():
+                try:
+                    watch_path.mkdir(parents=True, exist_ok=True)
+                    log.info("[watch:%s] created watch_folder: %s", name, watch_dir)
+                except OSError as e:
+                    log.error("[watch:%s] cannot create watch_folder: %s", name, e)
+                    continue
+            handler = _ProfileFolderHandler(name, prof, global_cfg)
+            observer = Observer()
+            observer.schedule(handler, str(watch_path), recursive=False)
+            observer.daemon = True
+            observer.start()
+            self._observers.append((name, observer))
+            log.info("[watch:%s] watching folder: %s", name, watch_dir)
+
+    def stop(self):
+        for name, observer in self._observers:
+            try:
+                observer.stop()
+                observer.join(timeout=3)
+                log.info("[watch:%s] observer stopped", name)
+            except Exception as e:
+                log.error("[watch:%s] observer stop error: %s", name, e)
+        self._observers.clear()
+
+    def restart(self, cfg):
+        self.stop()
+        self.cfg = cfg
+        self.start()
+
+
 # ── 自动更新 ──────────────────────────────────────────
 def parse_version(tag):
     return tuple(int(x) for x in tag.lstrip("v").split("."))
@@ -495,7 +646,7 @@ class SettingsDialog:
         self.root.resizable(False, False)
         self.root.configure(bg="#f5f5f5")
 
-        w, h = 540, 600
+        w, h = 540, 650
         x = (self.root.winfo_screenwidth() - w) // 2
         y = (self.root.winfo_screenheight() - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
@@ -598,6 +749,23 @@ class SettingsDialog:
             )
         row += 1
 
+        # 监控文件夹
+        ttk.Separator(fields_frame, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6
+        )
+        row += 1
+        ttk.Label(fields_frame, text="监控文件夹:").grid(row=row, column=0, sticky="w", pady=3)
+        wf_frame = ttk.Frame(fields_frame)
+        wf_frame.grid(row=row, column=1, sticky="ew", pady=3, padx=(8, 0))
+        self.watch_folder_var = tk.StringVar()
+        ttk.Entry(wf_frame, textvariable=self.watch_folder_var, width=26).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(wf_frame, text="浏览", command=self._browse_watch_folder, width=5).pack(
+            side="left", padx=(4, 0)
+        )
+        row += 1
+
         fields_frame.columnconfigure(1, weight=1)
 
         # ── 全局设置 ──
@@ -646,6 +814,7 @@ class SettingsDialog:
         self.path_var.set(prof.get("remote_path", ""))
         self.url_var.set(prof.get("url_prefix", ""))
         self.fmt_var.set(prof.get("clipboard_format", "path"))
+        self.watch_folder_var.set(prof.get("watch_folder", ""))
 
     def _save_current_profile_from_ui(self):
         name = self.active
@@ -660,6 +829,7 @@ class SettingsDialog:
             "remote_path": self.path_var.get().strip(),
             "url_prefix": self.url_var.get().strip(),
             "clipboard_format": self.fmt_var.get(),
+            "watch_folder": self.watch_folder_var.get().strip(),
         })
 
     def _on_profile_switch(self, event=None):
@@ -717,6 +887,11 @@ class SettingsDialog:
         )
         if path:
             self.key_var.set(path)
+
+    def _browse_watch_folder(self):
+        path = tk.filedialog.askdirectory(title="选择监控文件夹")
+        if path:
+            self.watch_folder_var.set(path)
 
     def _save(self):
         self._save_current_profile_from_ui()
@@ -822,6 +997,7 @@ class TrayApp:
         self._nid = None
         self._menu = None
         self._wndproc_ref = None
+        self._watcher = None
 
     def _create_icon_file(self):
         from PIL import Image, ImageDraw
@@ -986,9 +1162,14 @@ class TrayApp:
 
     def _open_settings(self):
         def open_dialog():
-            d = SettingsDialog(self.cfg, on_save=lambda c: self.cfg.update(c))
+            d = SettingsDialog(self.cfg, on_save=self._on_settings_saved)
             d.show()
         threading.Thread(target=open_dialog, daemon=True).start()
+
+    def _on_settings_saved(self, new_cfg):
+        self.cfg.update(new_cfg)
+        if self._watcher:
+            self._watcher.restart(self.cfg)
 
     def _check_update(self):
         def check():
@@ -1006,6 +1187,8 @@ class TrayApp:
         self.on_quit()
 
     def shutdown(self):
+        if self._watcher:
+            self._watcher.stop()
         if self._hwnd:
             _user32.PostMessageW(self._hwnd, _WM_CLOSE, 0, 0)
         if self._thread and self._thread.is_alive():
@@ -1017,6 +1200,9 @@ class TrayApp:
             self._thread = threading.Thread(target=self._message_loop, daemon=True)
             self._thread.start()
             self._thread.join(timeout=0.5)
+            if self._hwnd:
+                self._watcher = FolderWatcherManager(self.cfg)
+                self._watcher.start()
             return self._hwnd is not None
         except Exception as e:
             log.error("tray icon failed: %s\n%s", e, traceback.format_exc())
@@ -1025,6 +1211,9 @@ class TrayApp:
 
 def _show_fallback_window(cfg, quit_event):
     """托盘不可用时的 fallback 窗口"""
+    watcher = FolderWatcherManager(cfg)
+    watcher.start()
+
     root = tk.Tk()
     root.title("Clip Upload")
     root.geometry("320x160")
@@ -1041,9 +1230,9 @@ def _show_fallback_window(cfg, quit_event):
     ttk.Button(root, text="设置", command=lambda: threading.Thread(
         target=lambda: SettingsDialog(cfg, on_save=lambda c: None).show(), daemon=True
     ).start(), width=10).pack(pady=8)
-    ttk.Button(root, text="退出", command=lambda: (root.destroy(), quit_event()), width=10).pack()
+    ttk.Button(root, text="退出", command=lambda: (watcher.stop(), root.destroy(), quit_event()), width=10).pack()
 
-    root.protocol("WM_DELETE_WINDOW", lambda: (root.destroy(), quit_event()))
+    root.protocol("WM_DELETE_WINDOW", lambda: (watcher.stop(), root.destroy(), quit_event()))
     root.mainloop()
 
 
