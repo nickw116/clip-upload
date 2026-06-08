@@ -881,15 +881,20 @@ class SettingsDialog:
         self.pwd_entry.config(show="" if self.show_pwd_var.get() else "*")
 
     def _browse_key(self):
+        self.root.attributes('-topmost', True)
         path = tk.filedialog.askopenfilename(
             title="选择 SSH 私钥文件",
             filetypes=[("所有文件", "*.*"), ("PEM", "*.pem"), ("PPK", "*.ppk")],
+            parent=self.root,
         )
+        self.root.attributes('-topmost', False)
         if path:
             self.key_var.set(path)
 
     def _browse_watch_folder(self):
-        path = tk.filedialog.askdirectory(title="选择监控文件夹")
+        self.root.attributes('-topmost', True)
+        path = tk.filedialog.askdirectory(title="选择监控文件夹", parent=self.root)
+        self.root.attributes('-topmost', False)
         if path:
             self.watch_folder_var.set(path)
 
@@ -1182,8 +1187,10 @@ class TrayApp:
         threading.Thread(target=check, daemon=True).start()
 
     def _quit(self):
+        if self._watcher:
+            self._watcher.stop()
         if self._hwnd:
-            _user32.DestroyWindow(self._hwnd)
+            _user32.PostMessageW(self._hwnd, _WM_CLOSE, 0, 0)
         self.on_quit()
 
     def shutdown(self):
@@ -1207,6 +1214,51 @@ class TrayApp:
         except Exception as e:
             log.error("tray icon failed: %s\n%s", e, traceback.format_exc())
             return False
+
+
+def _show_welcome(cfg, merged):
+    """启动时显示欢迎对话框，点击后隐藏到后台"""
+    import tkinter.scrolledtext as st
+    root = tk.Tk()
+    root.title(f"Clip Upload v{__version__}")
+    root.resizable(False, False)
+    root.configure(bg="#f5f5f5")
+    w, h = 460, 380
+    x = (root.winfo_screenwidth() - w) // 2
+    y = (root.winfo_screenheight() - h) // 2
+    root.geometry(f"{w}x{h}+{x}+{y}")
+
+    main = ttk.Frame(root, padding=20)
+    main.pack(fill="both", expand=True)
+
+    ttk.Label(main, text="Clip Upload", font=("", 16, "bold")).pack(anchor="w")
+    ttk.Label(main, text=f"v{__version__}", foreground="gray").pack(anchor="w", pady=(0, 10))
+
+    active = cfg.get("active_profile", "default")
+    svr = merged.get("server", "") or "未配置"
+    hotkey = cfg.get("global", {}).get("hotkey", "ctrl+alt+u")
+
+    info = st.ScrolledText(main, height=10, width=48, wrap="word", font=("", 10))
+    info.pack(fill="both", expand=True, pady=(0, 10))
+    info.insert("1.0", f"""功能说明：
+  - 剪贴板截图上传：按 {hotkey} 上传当前剪贴板图片
+  - 文件夹监控：在设置中配置"监控文件夹"后，新文件自动上传
+  - 上传后路径自动写入剪贴板
+
+当前状态：
+  - 服务器: [{active}] {svr}
+  - 快捷键: {hotkey}
+
+使用方式：
+  1. 右键托盘图标可切换服务器、打开设置
+  2. 截图后按快捷键即可上传
+  3. 在设置中配置监控文件夹，文件放入即自动上传
+""")
+    info.config(state="disabled")
+
+    ttk.Button(main, text="隐藏到后台", command=root.destroy, width=16).pack()
+
+    root.mainloop()
 
 
 def _show_fallback_window(cfg, quit_event):
@@ -1270,6 +1322,11 @@ def main():
     merged = get_merged_config(cfg)
     log.info("active profile: %s | server=%s user=%s path=%s",
              active, merged.get("server"), merged.get("username"), merged.get("remote_path"))
+
+    # 启动欢迎对话框
+    _show_welcome(cfg, merged)
+
+    hotkey = cfg.get("global", {}).get("hotkey", "ctrl+alt+u")
 
     hotkey = cfg.get("global", {}).get("hotkey", "ctrl+alt+u")
     try:
