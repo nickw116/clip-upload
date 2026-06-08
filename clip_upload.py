@@ -634,85 +634,84 @@ class UpdateDialog:
 
 
 # ── Win32 原生对话框 (不依赖 tkinter, 可在任意线程调用) ──
+# 模块级 restype/argtypes 设置 (64-bit 指针必须正确设置)
+_shell32_dialog = ctypes.windll.shell32
+_ole32_dialog = ctypes.windll.ole32
+_comdlg32_dialog = ctypes.windll.comdlg32
+
+_shell32_dialog.SHBrowseForFolderW.restype = ctypes.c_void_p
+_shell32_dialog.SHGetPathFromIDListW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+_shell32_dialog.SHGetPathFromIDListW.restype = ctypes.c_int
+_ole32_dialog.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+_comdlg32_dialog.GetOpenFileNameW.restype = ctypes.c_int
+
+
+class _BROWSEINFOW(ctypes.Structure):
+    _fields_ = [
+        ("hwndOwner", ctypes.c_void_p),
+        ("pidlRoot", ctypes.c_void_p),
+        ("pszDisplayName", ctypes.c_wchar * 260),
+        ("lpszTitle", ctypes.c_wchar_p),
+        ("ulFlags", ctypes.c_int),
+        ("lpfn", ctypes.c_void_p),
+        ("lParam", ctypes.c_void_p),
+        ("iImage", ctypes.c_int),
+    ]
+
+_shell32_dialog.SHBrowseForFolderW.argtypes = [ctypes.POINTER(_BROWSEINFOW)]
+
+
 def _win32_browse_folder(title, initial_dir=""):
     """SHBrowseForFolderW 原生文件夹选择对话框"""
-    import ctypes
-    from ctypes import c_wchar_p, c_int, c_void_p, Structure, byref, POINTER
-
-    class BROWSEINFOW(Structure):
-        _fields_ = [
-            ("hwndOwner", c_void_p),
-            ("pidlRoot", c_void_p),
-            ("pszDisplayName", ctypes.c_wchar * 260),
-            ("lpszTitle", c_wchar_p),
-            ("ulFlags", c_int),
-            ("lpfn", c_void_p),
-            ("lParam", c_void_p),
-            ("iImage", c_int),
-        ]
-
-    shell32 = ctypes.windll.shell32
-    ole32 = ctypes.windll.ole32
-
-    # 64-bit: 返回值是指针，必须设 restype 否则截断
-    shell32.SHBrowseForFolderW.restype = c_void_p
-    shell32.SHBrowseForFolderW.argtypes = [POINTER(BROWSEINFOW)]
-    shell32.SHGetPathFromIDListW.argtypes = [c_void_p, c_wchar_p]
-    shell32.SHGetPathFromIDListW.restype = c_int
-    ole32.CoTaskMemFree.argtypes = [c_void_p]
-
-    ole32.CoInitialize(None)
+    _ole32_dialog.CoInitialize(None)
     try:
-        bi = BROWSEINFOW()
+        bi = _BROWSEINFOW()
         bi.hwndOwner = 0
         bi.lpszTitle = title
         bi.ulFlags = 0x00000040  # BIF_NEWDIALOGSTYLE
-        pidl = shell32.SHBrowseForFolderW(byref(bi))
+        pidl = _shell32_dialog.SHBrowseForFolderW(ctypes.byref(bi))
         if not pidl:
             return None
         path = ctypes.create_unicode_buffer(260)
-        if not shell32.SHGetPathFromIDListW(pidl, path):
-            ole32.CoTaskMemFree(pidl)
+        if not _shell32_dialog.SHGetPathFromIDListW(pidl, path):
+            _ole32_dialog.CoTaskMemFree(pidl)
             return None
-        ole32.CoTaskMemFree(pidl)
+        _ole32_dialog.CoTaskMemFree(pidl)
         result = path.value
         return result if result else None
     finally:
-        ole32.CoUninitialize()
+        _ole32_dialog.CoUninitialize()
 
 
 def _win32_open_file_dialog(title, filter_str):
     """GetOpenFileNameW 原生文件选择对话框"""
-    import ctypes
-    from ctypes import c_wchar_p, c_int, c_void_p, Structure, byref, sizeof, POINTER
+    from ctypes import c_wchar_p, Structure, byref, sizeof
 
     class OPENFILENAMEW(Structure):
         _fields_ = [
-            ("lStructSize", c_int),
-            ("hwndOwner", c_void_p),
-            ("hInstance", c_void_p),
+            ("lStructSize", ctypes.c_int),
+            ("hwndOwner", ctypes.c_void_p),
+            ("hInstance", ctypes.c_void_p),
             ("lpstrFilter", c_wchar_p),
             ("lpstrCustomFilter", c_wchar_p),
-            ("nMaxCustFilter", c_int),
-            ("nFilterIndex", c_int),
+            ("nMaxCustFilter", ctypes.c_int),
+            ("nFilterIndex", ctypes.c_int),
             ("lpstrFile", c_wchar_p),
-            ("nMaxFile", c_int),
+            ("nMaxFile", ctypes.c_int),
             ("lpstrFileTitle", c_wchar_p),
-            ("nMaxFileTitle", c_int),
+            ("nMaxFileTitle", ctypes.c_int),
             ("lpstrInitialDir", c_wchar_p),
             ("lpstrTitle", c_wchar_p),
-            ("Flags", c_int),
+            ("Flags", ctypes.c_int),
             ("nFileOffset", ctypes.c_ushort),
             ("nFileExtension", ctypes.c_ushort),
             ("lpstrDefExt", c_wchar_p),
-            ("lCustData", c_void_p),
-            ("lpfnHook", c_void_p),
+            ("lCustData", ctypes.c_void_p),
+            ("lpfnHook", ctypes.c_void_p),
             ("lpTemplateName", c_wchar_p),
         ]
 
-    comdlg32 = ctypes.windll.comdlg32
-    comdlg32.GetOpenFileNameW.restype = c_int
-    comdlg32.GetOpenFileNameW.argtypes = [POINTER(OPENFILENAMEW)]
+    _comdlg32_dialog.GetOpenFileNameW.argtypes = [ctypes.POINTER(OPENFILENAMEW)]
 
     buf = ctypes.create_unicode_buffer(260)
     ofn = OPENFILENAMEW()
@@ -725,7 +724,7 @@ def _win32_open_file_dialog(title, filter_str):
     ofn.lpstrTitle = title
     ofn.Flags = 0x00001000  # OFN_FILEMUSTEXIST
 
-    if comdlg32.GetOpenFileNameW(byref(ofn)):
+    if _comdlg32_dialog.GetOpenFileNameW(byref(ofn)):
         return buf.value
     return None
 
