@@ -549,12 +549,12 @@ def do_update(info, on_quit):
                     f.write(chunk)
 
         bat = f"""@echo off
-chcp 65001 >/dev/null
+chcp 65001 >NUL
 echo 正在更新 ClipUpload...
 :retry
 del "{exe_path}"
 if exist "{exe_path}" (
-    timeout /t 1 /nobreak >/dev/null
+    timeout /t 1 /nobreak >NUL
     goto retry
 )
 move /y "{new_exe}" "{exe_path}"
@@ -637,7 +637,7 @@ class UpdateDialog:
 def _win32_browse_folder(title, initial_dir=""):
     """SHBrowseForFolderW 原生文件夹选择对话框"""
     import ctypes
-    from ctypes import c_wchar_p, c_int, c_void_p, POINTER, Structure, byref
+    from ctypes import c_wchar_p, c_int, c_void_p, Structure, byref
 
     class BROWSEINFOW(Structure):
         _fields_ = [
@@ -658,7 +658,6 @@ def _win32_browse_folder(title, initial_dir=""):
     try:
         bi = BROWSEINFOW()
         bi.hwndOwner = 0
-        bi.pszDisplayName = (ctypes.c_wchar * 260)()
         bi.lpszTitle = title
         bi.ulFlags = 0x00000040  # BIF_NEWDIALOGSTYLE
         pidl = shell32.SHBrowseForFolderW(byref(bi))
@@ -709,7 +708,7 @@ def _win32_open_file_dialog(title, filter_str):
     ofn.hwndOwner = 0
     ofn.lpstrFilter = filter_str
     ofn.nFilterIndex = 1
-    ofn.lpstrFile = buf
+    ofn.lpstrFile = ctypes.cast(buf, c_wchar_p)
     ofn.nMaxFile = 260
     ofn.lpstrTitle = title
     ofn.Flags = 0x00001000  # OFN_FILEMUSTEXIST
@@ -1105,6 +1104,7 @@ class TrayApp:
 
     def _build_menu(self):
         self._menu_actions.clear()
+        self._next_menu_id = 1000
         hmenu = _user32.CreatePopupMenu()
         self._build_menu_items(hmenu, self._menu_defs())
         return hmenu
@@ -1136,7 +1136,6 @@ class TrayApp:
     def _build_menu_items(self, hmenu, items):
         from ctypes import byref
         MIIM_FMASK = _MIIM_STRING | _MIIM_ID
-        mid = 1000
         for item in reversed(items):
             if item is None:
                 _user32.AppendMenuW(hmenu, 0x800, 0, None)
@@ -1147,6 +1146,7 @@ class TrayApp:
                 _user32.AppendMenuW(hmenu, 0x10, sub, text)  # MF_POPUP
             else:
                 text, callback = item
+                mid = self._next_menu_id
                 self._menu_actions[mid] = callback
                 mii = _MENUITEMINFOW()
                 mii.cbSize = ctypes.sizeof(_MENUITEMINFOW)
@@ -1155,7 +1155,7 @@ class TrayApp:
                 mii.dwTypeData = text
                 mii.cch = len(text)
                 _user32.InsertMenuItemW(hmenu, 0, True, byref(mii))
-                mid += 1
+                self._next_menu_id += 1
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         if msg == _WM_COMMAND:
@@ -1270,6 +1270,7 @@ class TrayApp:
             self._watcher.stop()
         if self._hwnd:
             _user32.PostMessageW(self._hwnd, _WM_CLOSE, 0, 0)
+        self._hwnd = None
         self.on_quit()
 
     def shutdown(self):
@@ -1277,6 +1278,7 @@ class TrayApp:
             self._watcher.stop()
         if self._hwnd:
             _user32.PostMessageW(self._hwnd, _WM_CLOSE, 0, 0)
+            self._hwnd = None
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3)
 
@@ -1315,7 +1317,7 @@ def _show_welcome(cfg, merged):
 
     active = cfg.get("active_profile", "default")
     svr = merged.get("server", "") or "未配置"
-    hotkey = cfg.get("global", {}).get("hotkey", "ctrl+alt+u")
+    hotkey = merged.get("hotkey", "ctrl+alt+u")
 
     info = st.ScrolledText(main, height=10, width=48, wrap="word", font=("", 10))
     info.pack(fill="both", expand=True, pady=(0, 10))
@@ -1404,8 +1406,6 @@ def main():
 
     # 启动欢迎对话框
     _show_welcome(cfg, merged)
-
-    hotkey = cfg.get("global", {}).get("hotkey", "ctrl+alt+u")
 
     hotkey = cfg.get("global", {}).get("hotkey", "ctrl+alt+u")
     try:
