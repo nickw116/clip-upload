@@ -47,8 +47,9 @@ print()
 
 
 def test_import():
-    import unittest.mock as mock
     if sys.platform != "win32":
+        # Linux: mock Windows-only modules
+        import unittest.mock as mock
         sys.modules.setdefault("msvcrt", mock.MagicMock())
         if not hasattr(ctypes, "windll"):
             ctypes.windll = mock.MagicMock()
