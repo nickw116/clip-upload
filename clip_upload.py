@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-剪贴板图片上传工具 (Windows)
-后台运行，按 Ctrl+Alt+U 上传当前剪贴板图片到服务器，路径自动写回剪贴板。
-托盘图标，右键退出 / 切换服务器 / 打开设置 / 检查更新。
+文件夹监控上传工具 (Windows)
+后台监控指定文件夹，新文件自动上传到服务器，文件名写入剪贴板。
+托盘图标，右键打开设置 / 检查更新 / 退出。
 """
 
 import ctypes
@@ -1127,18 +1127,6 @@ class TrayApp:
     def _menu_defs(self):
         profiles = self.cfg.get("profiles", {})
         items = []
-        if len(profiles) > 1:
-            sub = []
-            active = self.cfg.get("active_profile", "default")
-            for name, prof in profiles.items():
-                prefix = ">> " if name == active else "    "
-                watch = prof.get("watch_folder", "")
-                label = f"{prefix} {name}"
-                if watch:
-                    label += f" [{Path(watch).name}]"
-                sub.append((label, lambda n=name: self._switch_profile(n)))
-            items.append(("切换配置", sub))
-            items.append(None)
         items.append(("设置...", self._open_settings))
         items.append(("检查更新...", self._check_update))
         items.append(("打开配置文件", lambda: os.startfile(str(CONFIG_PATH))))
@@ -1239,25 +1227,6 @@ class TrayApp:
             _user32.TranslateMessage(ctypes.byref(msg))
             _user32.DispatchMessageW(ctypes.byref(msg))
 
-    def _switch_profile(self, name):
-        self.cfg["active_profile"] = name
-        save_config(self.cfg)
-        merged = get_merged_config(self.cfg)
-        log.info("switched to profile: %s (%s)", name, merged.get("server", ""))
-        show_notification("Clip Upload", f"已切换到: {name}")
-        self._update_tooltip()
-
-    def _update_tooltip(self):
-        if not self._hwnd or not self._nid:
-            return
-        active = self.cfg.get("active_profile", "default")
-        merged = get_merged_config(self.cfg)
-        svr = merged.get("server", "") or "未配置"
-        tip = f"ClipUpload v{__version__} [{active}] {svr}"
-        self._nid.szTip = tip[:127]
-        self._nid.uFlags = _NIF_TIP
-        _shell32.Shell_NotifyIconW(_NIM_MODIFY, ctypes.byref(self._nid))
-
     def _open_settings(self):
         def open_dialog():
             d = SettingsDialog(self.cfg, on_save=self._on_settings_saved)
@@ -1342,7 +1311,7 @@ def _show_welcome(cfg, merged):
   - 服务器: [{active}] {svr}
 
 使用方式：
-  1. 右键托盘图标可切换配置、打开设置
+  1. 右键托盘图标打开设置
   2. 在设置中配置监控文件夹，文件放入即自动上传
   3. 上传完成后文件名已复制到剪贴板，直接粘贴即可
 """)
