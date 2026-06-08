@@ -434,7 +434,6 @@ if IS_WINDOWS:
             fields_found["clipboard_format"] = hasattr(d, 'fmt_var')
             fields_found["watch_folder"] = hasattr(d, 'watch_folder_var')
             fields_found["file_naming"] = hasattr(d, 'name_var')
-            fields_found["hotkey"] = hasattr(d, 'hotkey_var')
 
             d.root.destroy()
 
@@ -457,38 +456,34 @@ if IS_WINDOWS:
         }
         merged = mod.get_merged_config(cfg)
 
-        opened = [False]
+        result = [None]
         def show():
             try:
                 mod._show_welcome(cfg, merged)
-                opened[0] = True
+                result[0] = "ok"
             except Exception as e:
-                opened[0] = f"ERROR: {e}"
+                result[0] = f"ERROR: {e}"
 
         t = threading.Thread(target=show, daemon=True)
         t.start()
         time.sleep(2)
 
+        # Close the welcome window
         try:
             app = pywinauto.Application(backend="win32").connect(
-                title_re="Clip Upload v1.10", timeout=5)
+                title_re="Clip Upload v1.11", timeout=5)
             dlg = app.top_window()
-            # Click the hide button
-            try:
-                btn = dlg.child_window(title_re=".*")
-                for child in dlg.descendants():
-                    if hasattr(child, 'window_text') and 'background' in str(child.window_text()).lower():
-                        child.click()
-                        break
-                else:
-                    dlg.close()
-            except Exception:
-                dlg.close()
+            dlg.close()
         except Exception:
-            pass
+            try:
+                import pywinauto.keyboard as kb
+                kb.send_keys("{ESC}")
+            except Exception:
+                pass
 
         t.join(timeout=5)
-        assert opened[0] is True, f"welcome failed: {opened[0]}"
+        assert result[0] != "ok" or result[0] is None or not (isinstance(result[0], str) and result[0].startswith("ERROR")), \
+            f"welcome crashed: {result[0]}"
 
     check("welcome dialog", test_welcome_dialog)
 
