@@ -23,7 +23,7 @@ from pathlib import Path
 from tkinter import ttk, simpledialog, messagebox
 import tkinter as tk
 
-__version__ = "1.10.5"
+__version__ = "1.11.0"
 REPO_API = "https://api.github.com/repos/nickw116/clip-upload/releases/latest"
 
 # ── 日志 ──────────────────────────────────────────────
@@ -90,7 +90,6 @@ PROFILE_FIELDS = {
 GLOBAL_FIELDS = {
     "file_naming": "datetime",
     "image_format": "png",
-    "hotkey": "ctrl+alt+u",
     "auto_update": True,
     "last_check": "",
 }
@@ -407,6 +406,17 @@ def _upload_from_folder(local_path, profile_cfg, global_cfg, profile_name):
         upload_file(local_path, merged, filename)
         log.info("[watch:%s] uploaded: %s -> %s", profile_name, local_path, filename)
     except Exception as e:
+        log.error("[watch:%s] upload failed for %s: %s\n%s",
+                  profile_name, local_path, e, traceback.format_exc())
+        return
+
+    # 上传成功后把文件名写入剪贴板
+    clipboard_content = filename
+    try:
+        set_clipboard_text(clipboard_content)
+        log.info("[watch:%s] clipboard set: %s", profile_name, clipboard_content)
+    except Exception as e:
+        log.warning("[watch:%s] clipboard set failed: %s", profile_name, e)
         log.error("[watch:%s] upload failed for %s: %s\n%s",
                   profile_name, local_path, e, traceback.format_exc())
         return
@@ -877,15 +887,9 @@ class SettingsDialog:
         ttk.Radiobutton(nf, text="日期时间", variable=self.name_var, value="datetime").pack(side="left", padx=(0, 12))
         ttk.Radiobutton(nf, text="随机 UUID", variable=self.name_var, value="uuid").pack(side="left")
 
-        ttk.Label(glob_frame, text="快捷键:").grid(row=1, column=0, sticky="w", pady=3)
-        self.hotkey_var = tk.StringVar(value=glob.get("hotkey", "ctrl+alt+u"))
-        ttk.Entry(glob_frame, textvariable=self.hotkey_var, width=18).grid(
-            row=1, column=1, sticky="w", pady=3, padx=(8, 0)
-        )
-
         self.auto_update_var = tk.BooleanVar(value=glob.get("auto_update", True))
         ttk.Checkbutton(glob_frame, text="自动检查更新", variable=self.auto_update_var).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=3
+            row=1, column=0, columnspan=2, sticky="w", pady=3
         )
 
         # ── 按钮 ──
@@ -995,7 +999,6 @@ class SettingsDialog:
         self.cfg["global"] = {
             "file_naming": self.name_var.get(),
             "image_format": "png",
-            "hotkey": self.hotkey_var.get().strip(),
             "auto_update": self.auto_update_var.get(),
             "last_check": self.cfg.get("global", {}).get("last_check", ""),
         }
@@ -1122,20 +1125,19 @@ class TrayApp:
         return hmenu
 
     def _menu_defs(self):
-        active = self.cfg.get("active_profile", "default")
         profiles = self.cfg.get("profiles", {})
-        merged = get_merged_config(self.cfg)
-        svr = merged.get("server", "") or "未配置"
         items = []
-        items.append(("上传截图", lambda: do_upload(self.cfg)))
-        items.append(None)  # separator
         if len(profiles) > 1:
             sub = []
+            active = self.cfg.get("active_profile", "default")
             for name, prof in profiles.items():
                 prefix = ">> " if name == active else "    "
-                p_svr = prof.get("server", "") or "未配置"
-                sub.append((f"{prefix} {name} ({p_svr})", lambda n=name: self._switch_profile(n)))
-            items.append(("切换服务器", sub))
+                watch = prof.get("watch_folder", "")
+                label = f"{prefix} {name}"
+                if watch:
+                    label += f" [{Path(watch).name}]"
+                sub.append((label, lambda n=name: self._switch_profile(n)))
+            items.append(("切换配置", sub))
             items.append(None)
         items.append(("设置...", self._open_settings))
         items.append(("检查更新...", self._check_update))
@@ -1186,7 +1188,7 @@ class TrayApp:
                     self._menu, 0, pos.x, pos.y, 0, hwnd, None)
                 _user32.PostMessageW(hwnd, 0, 0, 0)
             elif lparam == _WM_LBUTTONDBLCLK:
-                do_upload(self.cfg)
+                self._open_settings()
         elif msg == _WM_CLOSE:
             _user32.DestroyWindow(hwnd)
             return 0
@@ -1329,23 +1331,20 @@ def _show_welcome(cfg, merged):
 
     active = cfg.get("active_profile", "default")
     svr = merged.get("server", "") or "未配置"
-    hotkey = merged.get("hotkey", "ctrl+alt+u")
 
     info = st.ScrolledText(main, height=10, width=48, wrap="word", font=("", 10))
     info.pack(fill="both", expand=True, pady=(0, 10))
     info.insert("1.0", f"""功能说明：
-  - 剪贴板截图上传：按 {hotkey} 上传当前剪贴板图片
   - 文件夹监控：在设置中配置"监控文件夹"后，新文件自动上传
-  - 上传后路径自动写入剪贴板
+  - 上传后文件名自动写入剪贴板
 
 当前状态：
   - 服务器: [{active}] {svr}
-  - 快捷键: {hotkey}
 
 使用方式：
-  1. 右键托盘图标可切换服务器、打开设置
-  2. 截图后按快捷键即可上传
-  3. 在设置中配置监控文件夹，文件放入即自动上传
+  1. 右键托盘图标可切换配置、打开设置
+  2. 在设置中配置监控文件夹，文件放入即自动上传
+  3. 上传完成后文件名已复制到剪贴板，直接粘贴即可
 """)
     info.config(state="disabled")
 
@@ -1371,7 +1370,7 @@ def _show_fallback_window(cfg, quit_event):
 
     ttk.Label(root, text=f"Clip Upload v{__version__}", font=("", 12, "bold")).pack(pady=(16, 4))
     ttk.Label(root, text=f"当前服务器: [{active}] {svr}").pack()
-    ttk.Label(root, text="快捷键: Ctrl+Alt+U 上传截图").pack(pady=4)
+    ttk.Label(root, text="监控文件夹中的新文件将自动上传").pack(pady=4)
     ttk.Button(root, text="设置", command=lambda: threading.Thread(
         target=lambda: SettingsDialog(cfg, on_save=lambda c: None).show(), daemon=True
     ).start(), width=10).pack(pady=8)
@@ -1418,14 +1417,6 @@ def main():
 
     # 启动欢迎对话框
     _show_welcome(cfg, merged)
-
-    hotkey = cfg.get("global", {}).get("hotkey", "ctrl+alt+u")
-    try:
-        import keyboard
-        keyboard.add_hotkey(hotkey, lambda: do_upload(cfg), suppress=False)
-        log.info("hotkey registered: %s", hotkey)
-    except Exception as e:
-        log.warning("hotkey register failed: %s", e)
 
     threading.Thread(target=lambda: auto_update_check(cfg, hard_quit), daemon=True).start()
 
