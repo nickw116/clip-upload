@@ -24,6 +24,8 @@ jobs:
 
       - name: Run tests
         run: python tests/test_gui.py
+        env:
+          PYTHONIOENCODING: utf-8
 
   build:
     needs: test
